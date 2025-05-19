@@ -46,6 +46,8 @@ type SnapshotterConfig struct {
 	enableFsverity bool
 	// setImmutable enables IMMUTABLE_FL file attribute for EROFS layers
 	setImmutable bool
+	// dmverityMode controls dm-verity behavior: "auto" (use if .dmverity exists), "on" (require .dmverity), "off" (disable)
+	dmverityMode string
 	// defaultSize creates a default size writable layer for active snapshots
 	defaultSize int64
 	// fsMergeThreshold (>0) enables fsmerge when the number of image layers exceeds this value
