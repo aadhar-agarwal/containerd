@@ -328,8 +328,16 @@ func (s erofsDiff) Apply(ctx context.Context, desc ocispec.Descriptor, mounts []
 
 	// Choose between tar index or tar conversion mode
 	if s.enableTarIndex {
-		// Use the tar index method: generate tar index and append tar
-		err = erofsutils.GenerateTarIndexAndAppendTar(ctx, rc, layerBlobPath, s.mkfsExtraOpts)
+		// Try to get direct file access if available
+		if rawProcessor, ok := processor.(diff.RawProcessor); ok && rawProcessor.File() != nil {
+			// Use the direct file for better performance
+			file := rawProcessor.File()
+			err = erofsutils.GenerateTarIndexAndAppendTar(ctx, file, layerBlobPath, s.mkfsExtraOpts)
+		} else {
+			// Use the reader approach
+			err = erofsutils.GenerateTarIndexAndAppendTar(ctx, rc, layerBlobPath, s.mkfsExtraOpts)
+		}
+
 		if err != nil {
 			return emptyDesc, fmt.Errorf("failed to generate tar index: %w", err)
 		}

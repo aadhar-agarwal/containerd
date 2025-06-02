@@ -44,6 +44,42 @@ func ConvertTarErofs(ctx context.Context, r io.Reader, layerPath string, mkfsExt
 	return nil
 }
 
+// prepareInputFile takes a reader and returns a seekable file along with a flag
+// indicating if the file is temporary and should be cleaned up afterward.
+func prepareInputFile(ctx context.Context, r io.Reader) (file *os.File, isTemp bool, err error) {
+	// Check if r is already a file that we can seek in
+	if f, ok := r.(*os.File); ok {
+		// Seek to the beginning for processing
+		if _, err = f.Seek(0, io.SeekStart); err != nil {
+			return nil, false, fmt.Errorf("failed to seek to beginning of tar file: %w", err)
+		}
+		log.G(ctx).Debug("Using direct file access")
+		return f, false, nil
+	}
+
+	// For regular readers, create a temporary file
+	tempFile, err := os.CreateTemp("", "erofs-tar-*")
+	if err != nil {
+		return nil, false, fmt.Errorf("failed to create temporary tar file: %w", err)
+	}
+
+	// For temp files, we need to copy the content
+	if _, err := io.Copy(tempFile, r); err != nil {
+		tempFile.Close()
+		os.Remove(tempFile.Name())
+		return nil, false, fmt.Errorf("failed to write tar content to temp file: %w", err)
+	}
+
+	// Reset to beginning of file
+	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
+		tempFile.Close()
+		os.Remove(tempFile.Name())
+		return nil, false, fmt.Errorf("failed to seek to beginning of tar file: %w", err)
+	}
+
+	return tempFile, true, nil
+}
+
 // GenerateTarIndexAndAppendTar calculates tar index using --tar=i option
 // and appends the original tar content to create a combined EROFS layer.
 //
@@ -51,22 +87,23 @@ func ConvertTarErofs(ctx context.Context, r io.Reader, layerPath string, mkfsExt
 // for the tar content. The resulting file structure is:
 // [Tar index][Original tar content]
 func GenerateTarIndexAndAppendTar(ctx context.Context, r io.Reader, layerPath string, mkfsExtraOpts []string) error {
-	// Create a temporary file for storing the tar content
-	tarFile, err := os.CreateTemp("", "erofs-tar-*")
+	tarFile, isTemp, err := prepareInputFile(ctx, r)
 	if err != nil {
-		return fmt.Errorf("failed to create temporary tar file: %w", err)
+		return err
 	}
-	defer os.Remove(tarFile.Name())
-	defer tarFile.Close()
 
-	// Use TeeReader to process the input once while saving it to disk
-	teeReader := io.TeeReader(r, tarFile)
+	if isTemp {
+		defer func() {
+			tarFile.Close()
+			os.Remove(tarFile.Name())
+		}()
+	}
 
 	// Generate tar index directly to layerPath using --tar=i option
 	args := append([]string{"--tar=i", "--aufs", "--quiet"}, mkfsExtraOpts...)
 	args = append(args, layerPath)
 	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
-	cmd.Stdin = teeReader
+	cmd.Stdin = tarFile
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("tar index generation failed with command 'mkfs.erofs %s': %s: %w",
@@ -84,9 +121,9 @@ func GenerateTarIndexAndAppendTar(ctx context.Context, r io.Reader, layerPath st
 	}
 	defer f.Close()
 
-	// Rewind the temporary file
-	if _, err := tarFile.Seek(0, 0); err != nil {
-		return fmt.Errorf("failed to seek to the beginning of tar file: %w", err)
+	// Rewind the tar file for appending
+	if _, err := tarFile.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("failed to seek to beginning of tar file: %w", err)
 	}
 
 	// Append tar content
