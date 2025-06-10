@@ -173,9 +173,29 @@ Instead of extracting the entire tar archive to create an EROFS filesystem, the 
 2. Appends the original tar content to the index
 3. Creates a combined file: `[Tar index][Original tar content]`
 
-When mounted, EROFS uses the tar index to provide efficient random access to the tar content without having to extract it first.
+### Use Cases for Tar Index Mode
 
-### Configuration
+#### 1. Enhanced Security with dm-verity Integration
+
+The primary use case for tar index mode is to enable secure container image distribution with dm-verity integration:
+
+- **Continuous Anti-Tampering Protection**: By extending the EROFS snapshotter to work with unmodified tar files (prefixed with the tar index and suffixed with Merkle trees), we create a secure distribution model where:
+  - The EROFS blob is mounted through a dm-verity layer, ensuring content integrity verification
+  - Root hash signatures are passed to the kernel during mounting, establishing a trusted boot path
+  - Any modification to the container image layers is detected by the dm-verity verification
+
+- **Support for Integrity Policy Enforcement (IPE)**: This approach allows container images to be the target of integrity policy enforcement, ensuring only verified, untampered images are executed.
+
+#### 2. Optimized Image Distribution and Deployment
+
+Tar index mode can improve the container image distribution workflow:
+
+- **Reduced Compute Requirements**: 
+  - Pre-generate the tar index and Merkle trees at build time
+  - Download both the root hash signatures and the pre-generated index/Merkle trees to nodes
+  - Eliminates the need for expensive compute operations on the target node
+
+#### Configuration
 
 For the EROFS differ:
 
