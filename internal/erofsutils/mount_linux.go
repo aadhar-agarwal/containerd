@@ -45,8 +45,9 @@ func ConvertTarErofs(ctx context.Context, r io.Reader, layerPath string, mkfsExt
 }
 
 // prepareInputFile takes a reader and returns a seekable file along with a flag
-// indicating if the file is temporary and should be cleaned up afterward.
-func prepareInputFile(ctx context.Context, r io.Reader) (file *os.File, isTemp bool, err error) {
+// indicating if the file needs to be closed afterward. Temporary files are immediately
+// unlinked after creation for automatic cleanup.
+func prepareInputFile(ctx context.Context, r io.Reader) (file *os.File, needsClose bool, err error) {
 	// Check if r is already a file that we can seek in
 	if f, ok := r.(*os.File); ok {
 		// Seek to the beginning for processing
@@ -63,17 +64,21 @@ func prepareInputFile(ctx context.Context, r io.Reader) (file *os.File, isTemp b
 		return nil, false, fmt.Errorf("failed to create temporary tar file: %w", err)
 	}
 
+	// Immediately unlink the file while keeping the file descriptor open
+	if err := os.Remove(tempFile.Name()); err != nil {
+		tempFile.Close()
+		return nil, false, fmt.Errorf("failed to unlink temporary tar file: %w", err)
+	}
+
 	// For temp files, we need to copy the content
 	if _, err := io.Copy(tempFile, r); err != nil {
 		tempFile.Close()
-		os.Remove(tempFile.Name())
 		return nil, false, fmt.Errorf("failed to write tar content to temp file: %w", err)
 	}
 
 	// Reset to beginning of file
 	if _, err := tempFile.Seek(0, io.SeekStart); err != nil {
 		tempFile.Close()
-		os.Remove(tempFile.Name())
 		return nil, false, fmt.Errorf("failed to seek to beginning of tar file: %w", err)
 	}
 
@@ -87,15 +92,14 @@ func prepareInputFile(ctx context.Context, r io.Reader) (file *os.File, isTemp b
 // for the tar content. The resulting file structure is:
 // [Tar index][Original tar content]
 func GenerateTarIndexAndAppendTar(ctx context.Context, r io.Reader, layerPath string, mkfsExtraOpts []string) error {
-	tarFile, isTemp, err := prepareInputFile(ctx, r)
+	tarFile, needsClose, err := prepareInputFile(ctx, r)
 	if err != nil {
 		return err
 	}
 
-	if isTemp {
+	if needsClose {
 		defer func() {
 			tarFile.Close()
-			os.Remove(tarFile.Name())
 		}()
 	}
 
