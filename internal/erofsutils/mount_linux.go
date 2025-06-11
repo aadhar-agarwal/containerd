@@ -25,6 +25,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/errdefs"
@@ -51,6 +52,7 @@ func ConvertTarErofs(ctx context.Context, r io.Reader, layerPath string, mkfsExt
 // for the tar content. The resulting file structure is:
 // [Tar index][Original tar content]
 func GenerateTarIndexAndAppendTar(ctx context.Context, r io.Reader, layerPath string, mkfsExtraOpts []string) error {
+	start_time := time.Now()
 	// Create a temporary file for storing the tar content
 	tarFile, err := os.CreateTemp("", "erofs-tar-*")
 	if err != nil {
@@ -61,13 +63,18 @@ func GenerateTarIndexAndAppendTar(ctx context.Context, r io.Reader, layerPath st
 
 	// Use TeeReader to process the input once while saving it to disk
 	teeReader := io.TeeReader(r, tarFile)
+	duration := time.Since(start_time)
+	// log.G(ctx).Debugf("Prepared input tar file in %s", duration)
 
 	// Generate tar index directly to layerPath using --tar=i option
+	start_time = time.Now()
 	args := append([]string{"--tar=i", "--aufs", "--quiet"}, mkfsExtraOpts...)
 	args = append(args, layerPath)
 	cmd := exec.CommandContext(ctx, "mkfs.erofs", args...)
 	cmd.Stdin = teeReader
 	out, err := cmd.CombinedOutput()
+	duration = time.Since(start_time)
+	log.G(ctx).Debugf("Generated tar index, and wrote to tarfile in %s", duration)
 	if err != nil {
 		return fmt.Errorf("tar index generation failed with command 'mkfs.erofs %s': %s: %w",
 			strings.Join(args, " "), out, err)
@@ -78,6 +85,7 @@ func GenerateTarIndexAndAppendTar(ctx context.Context, r io.Reader, layerPath st
 		cmd.Path, strings.Join(cmd.Args, " "), string(out))
 
 	// Open layerPath for appending
+	start_time = time.Now()
 	f, err := os.OpenFile(layerPath, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		return fmt.Errorf("failed to open layer file for appending: %w", err)
@@ -93,6 +101,8 @@ func GenerateTarIndexAndAppendTar(ctx context.Context, r io.Reader, layerPath st
 	if _, err := io.Copy(f, tarFile); err != nil {
 		return fmt.Errorf("failed to append tar to layer: %w", err)
 	}
+	duration = time.Since(start_time)
+	log.G(ctx).Debugf("Appended tar content in %s", duration)
 
 	log.G(ctx).Infof("Successfully generated EROFS layer with tar index and tar content: %s", layerPath)
 
