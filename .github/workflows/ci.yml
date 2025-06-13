@@ -692,6 +692,48 @@ jobs:
             *-junit.xml
             *-gotest.json
 
+  #
+  # EROFS Snapshotter Tests
+  #
+  erofs-snapshotter-test:
+    name: EROFS Snapshotter Test
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    needs: [project, linters, protos, man]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/install-go
+      - name: Install erofs-utils and dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y erofs-utils
+      - name: Install test tools
+        run: |
+          script/setup/install-gotestsum
+          script/setup/install-teststat
+      - name: Run EROFS snapshotter tests
+        env:
+          GOTESTSUM_JUNITFILE: ${{github.workspace}}/erofs-test-junit.xml
+          GOTESTSUM_JSONFILE: ${{github.workspace}}/erofs-test-gotest.json
+        run: |
+          sudo -E PATH=$PATH \
+            go test -v -race ./plugins/snapshots/erofs/... | tee erofs-test.log
+      - name: Summarize EROFS test results
+        if: always()
+        run: |
+          if [ -f erofs-test-gotest.json ]; then \
+            echo '# EROFS Snapshotter Test' >> $GITHUB_STEP_SUMMARY; \
+            teststat -markdown erofs-test-gotest.json >> $GITHUB_STEP_SUMMARY; \
+          fi
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: EROFS Snapshotter Test Results
+          path: |
+            erofs-test-junit.xml
+            erofs-test-gotest.json
+            erofs-test.log
+
   # Currently Github actions UI supports no masks to mark matrix jobs as required to pass status checks.
   # This means that every time version of Go, containerd, or OS is changed, a corresponding job should
   # be added to the list of required checks. Which is not very convenient.
