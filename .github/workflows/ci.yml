@@ -387,13 +387,35 @@ jobs:
           RUNC_FLAVOR: ${{ matrix.runc }}
         run: |
           sudo apt-get update
-          sudo apt-get install -y gperf dmsetup strace xfsprogs erofs-utils
-          sudo modprobe erofs
+          sudo apt-get install -y gperf dmsetup strace xfsprogs
           script/setup/install-seccomp
           script/setup/install-runc
           script/setup/install-cni $(grep containernetworking/plugins go.mod | awk '{print $2}')
           script/setup/install-critools
           script/setup/install-failpoint-binaries
+          
+      - name: Build and install erofs-utils from source
+        run: |          
+          # Install build dependencies
+          sudo apt-get install -y git gcc make autoconf automake libtool pkg-config libfuse3-dev
+          
+          # Clone the latest erofs-utils
+          git clone https://github.com/erofs/erofs-utils.git
+          cd erofs-utils
+          git checkout v1.8.5 # Use a specific version to ensure stability
+          
+          # Build and install
+          ./autogen.sh
+          ./configure
+          make -j$(nproc)
+          sudo make install
+          
+          # Verify installation
+          mkfs.erofs --version
+
+      - name: Load EROFS kernel module
+        run: |
+          sudo modprobe erofs
 
       # Disable criu testing on arm64 until we can solve the consistent failures of restore testing
       - if: matrix.os != 'ubuntu-24.04-arm'
