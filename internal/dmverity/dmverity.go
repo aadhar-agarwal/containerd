@@ -65,11 +65,11 @@ type DmverityOptions struct {
 func DefaultDmverityOptions() DmverityOptions {
 	return DmverityOptions{
 		HashAlgorithm: "sha256",
-		DataBlockSize: 4096,
-		HashBlockSize: 4096,
+		DataBlockSize: 512,
+		HashBlockSize: 512,
 		HashType:      1,
-		UseSuperblock: false,
-		Salt:          "1234000000000000000000000000000000000000000000000000000000000000",
+		UseSuperblock: true,
+		Salt:          "0000000000000000000000000000000000000000000000000000000000000000",
 	}
 }
 
