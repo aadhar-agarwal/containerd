@@ -19,6 +19,8 @@ package erofs
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -34,6 +36,7 @@ import (
 	"github.com/containerd/containerd/v2/internal/dmverity"
 	"github.com/containerd/containerd/v2/internal/erofsutils"
 	"github.com/containerd/containerd/v2/internal/fsverity"
+	"github.com/containerd/containerd/v2/pkg/snapshotters"
 	"github.com/containerd/continuity/fs"
 	"github.com/containerd/log"
 	"github.com/containerd/plugin"
@@ -80,12 +83,117 @@ type MetaStore interface {
 	Close() error
 }
 
+const signatureStore = "/var/lib/containerd/io.containerd.snapshotter.v1.erofs/signatures"
+
+// ImageInfo holds information about an image and its layers
+type ImageInfo struct {
+	Layers []LayerInfo `json:"layers"`
+}
+
+// LayerInfo holds information about a specific layer
+type LayerInfo struct {
+	Digest    string `json:"digest"`
+	RootHash  string `json:"root_hash"`
+	Signature string `json:"signature"`
+}
+
+// readSignatures reads all signature files from the signature store directory
+// and builds a map of layer digest to layer info
+func (s *snapshotter) readSignatures() (map[string]LayerInfo, error) {
+	signatures := make(map[string]LayerInfo)
+
+	// Check if the signatures directory exists
+	if _, err := os.Stat(signatureStore); err != nil {
+		if os.IsNotExist(err) {
+			// Directory doesn't exist, return empty signatures map
+			log.L.Debugf("signatures directory %s does not exist, skipping signature loading", signatureStore)
+			return signatures, nil
+		}
+		return nil, fmt.Errorf("failed to access signature store directory: %w", err)
+	}
+
+	// Read all files from the signature store directory
+	files, err := os.ReadDir(signatureStore)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read signature store directory: %w", err)
+	}
+
+	// Process each signature file
+	for _, file := range files {
+		// Skip directories
+		if file.IsDir() {
+			continue
+		}
+
+		// Read the signature file content
+		sigPath := filepath.Join(signatureStore, file.Name())
+		sigContent, err := os.ReadFile(sigPath)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read signature file %s: %w", sigPath, err)
+		}
+
+		// Parse the JSON content
+		var imageInfoList []ImageInfo
+		if err := json.Unmarshal(sigContent, &imageInfoList); err != nil {
+			// Log the error but continue with other files
+			log.L.WithError(err).Warnf("failed to parse signature file %s", sigPath)
+			continue
+		}
+
+		// Extract layer information
+		for _, imageInfo := range imageInfoList {
+			for _, layerInfo := range imageInfo.Layers {
+				signatures[layerInfo.Digest] = layerInfo
+				// Log the digest, root hash and signature
+				log.L.Debugf("loaded signature for layer %s: root hash %s, signature %s\n",
+					layerInfo.Digest, layerInfo.RootHash, layerInfo.Signature)
+			}
+		}
+	}
+
+	if len(signatures) > 0 {
+		log.L.Debugf("loaded %d signatures", len(signatures))
+	}
+
+	return signatures, nil
+}
+
+// prepareSignatureFile writes the signature bytes to a file that can be used with veritysetup
+// Reference: https://man7.org/linux/man-pages/man8/veritysetup.8.html
+func (s *snapshotter) prepareSignatureFile(hash, signature string) (string, error) {
+	log.L.Debugf("Preparing signature file for root hash %s", hash)
+
+	// Decode the base64 encoded signature
+	signatureBytes, err := base64.StdEncoding.DecodeString(signature)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode signature: %w", err)
+	}
+
+	// Write the signature bytes to a file that can be used with veritysetup
+	// Create directory if it doesn't exist
+	sigDir := filepath.Join(s.root, "signatures")
+	if err := os.MkdirAll(sigDir, 0700); err != nil {
+		return "", fmt.Errorf("failed to create signature directory: %w", err)
+	}
+
+	// Create a file to store the signature bytes
+	sigPath := filepath.Join(sigDir, fmt.Sprintf("%s.sig", hash))
+	if err := os.WriteFile(sigPath, signatureBytes, 0644); err != nil {
+		return "", fmt.Errorf("failed to write signature to file: %w", err)
+	}
+
+	log.L.Debugf("Wrote signature to file %s", sigPath)
+
+	return sigPath, nil
+}
+
 type snapshotter struct {
 	root           string
 	ms             *storage.MetaStore
 	ovlOptions     []string
 	enableFsverity bool
 	enableDmverity bool
+	signatures     map[string]LayerInfo
 }
 
 // check if EROFS kernel filesystem is registered or not
@@ -163,13 +271,23 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		return nil, err
 	}
 
-	return &snapshotter{
+	s := &snapshotter{
 		root:           root,
 		ms:             ms,
 		ovlOptions:     config.ovlOptions,
 		enableFsverity: config.enableFsverity,
 		enableDmverity: config.enableDmverity,
-	}, nil
+	}
+
+	// Load signatures (this will handle the case when directory doesn't exist)
+	signatures, err := s.readSignatures()
+	if err != nil {
+		log.L.WithError(err).Warn("failed to read signatures, continuing without signature verification")
+	} else {
+		s.signatures = signatures
+	}
+
+	return s, nil
 }
 
 // Close closes the snapshotter
@@ -207,7 +325,8 @@ func (s *snapshotter) workPath(id string) string {
 func (s *snapshotter) layerBlobPath(id string) string {
 	return filepath.Join(s.root, "snapshots", id, "layer.erofs")
 }
-func (s *snapshotter) formatLayerBlob(id string) error {
+
+func (s *snapshotter) formatLayerBlob(ctx context.Context, id string, snapshotInfo snapshots.Info) error {
 	layerBlob := s.layerBlobPath(id)
 	if _, err := os.Stat(layerBlob); err != nil {
 		return fmt.Errorf("failed to find valid erofs layer blob: %w", err)
@@ -235,14 +354,58 @@ func (s *snapshotter) formatLayerBlob(id string) error {
 		if err != nil {
 			return fmt.Errorf("failed to format dmverity: %w", err)
 		}
+
 		dmverityData := fmt.Sprintf("%s|%d", info.RootHash, fileinfo.Size())
 		if err := os.WriteFile(filepath.Join(s.root, "snapshots", id, ".dmverity"), []byte(dmverityData), 0644); err != nil {
 			return fmt.Errorf("failed to write dmverity root hash: %w", err)
 		}
+
+		var layerDigest string = ""
+		if snapshotInfo.Labels != nil {
+			if digest, ok := snapshotInfo.Labels[snapshotters.TargetLayerDigestLabel]; ok {
+				layerDigest = digest
+				log.L.Infof("found layer digest in labels: %s", layerDigest)
+			}
+		} else {
+			log.L.Debugf("snapshotInfo.Labels is nil")
+		}
+
+		log.L.Info("Before checking layerDigest s.signatures")
+		// If we have the layer digest and signatures map is available
+		if layerDigest != "" && s.signatures != nil {
+			// Check if the layer digest exists in our signatures map
+			if layerInfo, ok := s.signatures[layerDigest]; ok {
+				// Check if the calculated root hash matches the one in the signature
+				if layerInfo.RootHash == info.RootHash {
+					log.L.Debugf("root hash from signature matches calculated root hash: %s", info.RootHash)
+
+					// Store the signature in the snapshot labels using the existing transaction context
+					if snapshotInfo.Labels == nil {
+						snapshotInfo.Labels = make(map[string]string)
+					}
+					snapshotInfo.Labels["containerd.io/snapshot/erofs.root-hash"] = info.RootHash
+					snapshotInfo.Labels["containerd.io/snapshot/erofs.signature"] = layerInfo.Signature
+
+					updatedInfo, err := storage.UpdateInfo(ctx, snapshotInfo, "labels.containerd.io/snapshot/erofs.root-hash",
+						"labels.containerd.io/snapshot/erofs.signature")
+					if err != nil {
+						log.L.WithError(err).Warn("failed to update snapshot labels with signature")
+					} else {
+						log.L.Debugf("Updated snapshot labels with signature and root hash: %v", updatedInfo.Labels)
+					}
+				} else {
+					log.L.Errorf("root hash mismatch: calculated %s vs expected %s",
+						info.RootHash, layerInfo.RootHash)
+				}
+			} else {
+				log.L.Debugf("no signature found for layer digest: %s", layerDigest)
+			}
+		}
 	}
 	return nil
 }
-func (s *snapshotter) runDmverity(id string) (string, error) {
+
+func (s *snapshotter) runDmverity(ctx context.Context, id string) (string, error) {
 	layerBlob := s.layerBlobPath(id)
 	if _, err := os.Stat(layerBlob); err != nil {
 		return "", fmt.Errorf("failed to find valid erofs layer blob: %w", err)
@@ -251,7 +414,7 @@ func (s *snapshotter) runDmverity(id string) (string, error) {
 	devicePath := fmt.Sprintf("/dev/mapper/%s", dmName)
 	if _, err := os.Stat(devicePath); err == nil {
 		status, err := dmverity.Status(dmName)
-		fmt.Println("dmverity device status: ", status)
+		log.L.Debugf("dmverity device status: ", status)
 		if err != nil {
 			return "", fmt.Errorf("failed to get dmverity device status: %w", err)
 		}
@@ -277,10 +440,54 @@ func (s *snapshotter) runDmverity(id string) (string, error) {
 		}
 	}
 
+	var rootHashSignatureFile string = ""
+	var snapshotInfo snapshots.Info
+	if s.signatures != nil {
+		if err := s.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
+			var key, key_err = storage.KeyFromID(ctx, id)
+			if key_err != nil {
+				return fmt.Errorf("failed to get snapshot key from ID: %w", key_err)
+			}
+			log.L.Debugf("Key for snapshot %s: %s", id, key)
+			var snapshotInfoErr error
+			snapshotInfo, snapshotInfoErr = s.Stat(ctx, key)
+			if snapshotInfoErr != nil {
+				return fmt.Errorf("failed to get snapshot info: %w", snapshotInfoErr)
+			}
+			log.L.Debugf("Snapshot info for %s: %+v", id, snapshotInfo)
+			return nil
+		}); err != nil {
+			return "", err
+		}
+
+		log.L.Debugf("Labels from snapshot: %+v", snapshotInfo.Labels)
+
+		var signature = snapshotInfo.Labels["containerd.io/snapshot/erofs.signature"]
+		if signature != "" {
+			log.L.Debugf("Found signature for %s: %s", id, signature)
+			// Prepare the signature file to be used with veritysetup
+			rootHashSignatureFile, err = s.prepareSignatureFile(rootHash, signature)
+			if err != nil {
+				return "", fmt.Errorf("failed to prepare signature file for root hash %s: %w", rootHash, err)
+			}
+			log.L.Debugf("Prepared signature file for root hash %s at %s", rootHash, rootHashSignatureFile)
+		} else {
+			log.L.Debugf("No signature found for root hash %s in snapshot labels", rootHash)
+		}
+	}
+
 	if _, err := os.Stat(devicePath); err != nil {
-		fmt.Println("openning dmverity")
+		log.L.Debugf("Opening dmverity device for %s", id)
 		opts := dmverity.DefaultDmverityOptions()
 		opts.HashOffset = originalSize
+
+		if rootHashSignatureFile != "" {
+			log.L.Debugf("Using signature file %s for root hash %s", rootHashSignatureFile, rootHash)
+			// The rootHashSignatureFile now contains the path to the signature file
+			// We'll pass the file path to be used with --root-hash-signature by veritysetup
+			opts.RootHashSignature = rootHashSignatureFile
+		}
+
 		_, err = dmverity.Open(layerBlob, dmName, layerBlob, string(rootHash), &opts)
 		if err != nil {
 			return "", fmt.Errorf("failed to open dmverity device: %w", err)
@@ -332,15 +539,15 @@ func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 	return td, nil
 }
 
-func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]mount.Mount, error) {
+func (s *snapshotter) mounts(ctx context.Context, snap storage.Snapshot, info snapshots.Info) ([]mount.Mount, error) {
 	var options []string
 
-	fmt.Println("mounts called, info :", info)
-	fmt.Println("snap: ", snap)
+	log.L.Debugf("mounts called, info: %+v", info)
+	log.L.Debugf("snap: %+v", snap)
 	if len(snap.ParentIDs) == 0 {
-		fmt.Println("no parent ids")
+		log.L.Debugf("no parent ids")
 		m, mntpoint, err := s.lowerPath(snap.ID)
-		fmt.Printf("lowerPath: m = %v, mntpoint = %v\n", m, mntpoint)
+		log.L.Debugf("lowerPath: m = %v, mntpoint = %v", m, mntpoint)
 		if err == nil {
 			if snap.Kind != snapshots.KindView {
 				return nil, fmt.Errorf("only works for snapshots.KindView on a committed snapshot: %w", err)
@@ -350,9 +557,9 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 					return nil, err
 				}
 			}
-			fmt.Println("formatting layer blob m: ", m)
+			log.L.Debugf("formatting layer blob m: %+v", m)
 			if s.enableDmverity {
-				if err := s.formatLayerBlob(snap.ID); err != nil {
+				if err := s.formatLayerBlob(ctx, snap.ID, info); err != nil {
 					return nil, err
 				}
 			}
@@ -381,21 +588,29 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 		}, nil
 	}
 
-	fmt.Println("snap.Kind", snap.Kind)
+	log.L.Debugf("snap.Kind: %+v", snap.Kind)
 	if snap.Kind == snapshots.KindActive {
 		options = append(options,
 			fmt.Sprintf("workdir=%s", s.workPath(snap.ID)),
 			fmt.Sprintf("upperdir=%s", s.upperPath(snap.ID)),
 		)
 	} else if len(snap.ParentIDs) == 1 {
-		fmt.Println("len(snap.ParentIDs) == 1")
+		log.L.Debugf("len(snap.ParentIDs) == 1")
 		m, mntpoint, err := s.lowerPath(snap.ParentIDs[0])
 		if err != nil {
 			return nil, err
 		}
-		fmt.Printf("lowerPath: m = %v, mntpoint = %v\n", m, mntpoint)
+		log.L.Debugf("lowerPath: m = %v, mntpoint = %v", m, mntpoint)
 		if s.enableDmverity {
-			if err := s.formatLayerBlob(snap.ParentIDs[0]); err != nil {
+			parentKey, err := storage.KeyFromID(ctx, snap.ParentIDs[0])
+			if err != nil {
+				return nil, fmt.Errorf("failed to get parent key from ID: %w", err)
+			}
+			var parentInfo, parentInfoErr = s.Stat(ctx, parentKey)
+			if parentInfoErr != nil {
+				return nil, fmt.Errorf("failed to get parent snapshot info: %w", parentInfoErr)
+			}
+			if err := s.formatLayerBlob(ctx, snap.ParentIDs[0], parentInfo); err != nil {
 				return nil, err
 			}
 		}
@@ -408,7 +623,7 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 		return []mount.Mount{m}, nil
 	}
 
-	fmt.Println("snap.ParentIDs", snap.ParentIDs)
+	log.L.Debugf("snap.ParentIDs: %+v", snap.ParentIDs)
 	var lowerdirs []string
 	for i := range snap.ParentIDs {
 		m, mntpoint, err := s.lowerPath(snap.ParentIDs[i])
@@ -431,7 +646,7 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 			}
 		}
 		if s.enableDmverity {
-			devicePath, err := s.runDmverity(snap.ParentIDs[i])
+			devicePath, err := s.runDmverity(ctx, snap.ParentIDs[i])
 			if err != nil {
 				return nil, err
 			}
@@ -453,10 +668,10 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 		}
 		lowerdirs = append(lowerdirs, mntpoint)
 	}
-	fmt.Println("lowerdirs: ", lowerdirs)
+	log.L.Debugf("lowerdirs: %+v", lowerdirs)
 	options = append(options, fmt.Sprintf("lowerdir=%s", strings.Join(lowerdirs, ":")))
 	options = append(options, s.ovlOptions...)
-	fmt.Printf("options = %v\n", options)
+	log.L.Debugf("options = %+v", options)
 	return []mount.Mount{{
 		Type:    "overlay",
 		Source:  "overlay",
@@ -526,14 +741,16 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 	}); err != nil {
 		return nil, err
 	}
-	return s.mounts(snap, info)
+	return s.mounts(ctx, snap, info)
 }
 
 func (s *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
+	log.G(ctx).Infof("In Prepare for key: %s, parent: %s, opts: %v", key, parent, opts)
 	return s.createSnapshot(ctx, snapshots.KindActive, key, parent, opts)
 }
 
 func (s *snapshotter) View(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
+	log.G(ctx).Infof("In View for key: %s, parent: %s, opts: %v", key, parent, opts)
 	return s.createSnapshot(ctx, snapshots.KindView, key, parent, opts)
 }
 
@@ -570,12 +787,14 @@ func setImmutable(path string, enable bool) error {
 }
 
 func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snapshots.Opt) error {
+	log.G(ctx).Infof("In Commit for key: %s, name: %s, opts: %v", key, name, opts)
+
 	var layerBlob, upperDir string
 
 	// Apply the overlayfs upperdir (generated by non-EROFS differs) into a EROFS blob
 	// in a read transaction first since conversion could be slow.
-	err := s.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
-		id, _, _, err := storage.GetInfo(ctx, key)
+	err := s.ms.WithTransaction(ctx, true, func(ctx context.Context) error {
+		id, info, _, err := storage.GetInfo(ctx, key)
 		if err != nil {
 			return err
 		}
@@ -619,7 +838,7 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 		}
 
 		if s.enableDmverity {
-			err := s.formatLayerBlob(id)
+			err := s.formatLayerBlob(ctx, id, info)
 			// _, err := s.runDmverity(id)
 			if err != nil {
 				return fmt.Errorf("failed to run dmverity: %w", err)
@@ -641,18 +860,35 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 			return fmt.Errorf("failed to get the converted erofs blob: %w", err)
 		}
 
+		// Get current snapshot info to preserve the labels we've set in formatLayerBlob
+		_, info, _, err := storage.GetInfo(ctx, key)
+		if err != nil {
+			return fmt.Errorf("failed to get snapshot info: %w", err)
+		}
+
+		// Add any labels from formatLayerBlob to our opts
+		preservedOpts := append([]snapshots.Opt{}, opts...)
+		if len(info.Labels) > 0 {
+			labelOpt := snapshots.WithLabels(info.Labels)
+			preservedOpts = append(preservedOpts, labelOpt)
+		}
+
 		usage, err := fs.DiskUsage(ctx, layerBlob)
 		if err != nil {
 			return err
 		}
-		if _, err = storage.CommitActive(ctx, key, name, snapshots.Usage(usage), opts...); err != nil {
+
+		if _, err = storage.CommitActive(ctx, key, name, snapshots.Usage(usage), preservedOpts...); err != nil {
 			return fmt.Errorf("failed to commit snapshot %s: %w", key, err)
 		}
+		log.G(ctx).Infof("Committed snapshot %s to %s", key, name)
 		return nil
 	})
 }
 
 func (s *snapshotter) Mounts(ctx context.Context, key string) (_ []mount.Mount, err error) {
+	log.G(ctx).Infof("In Mounts for key: %s", key)
+
 	var snap storage.Snapshot
 	var info snapshots.Info
 	if err := s.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
@@ -669,7 +905,7 @@ func (s *snapshotter) Mounts(ctx context.Context, key string) (_ []mount.Mount, 
 	}); err != nil {
 		return nil, err
 	}
-	return s.mounts(snap, info)
+	return s.mounts(ctx, snap, info)
 }
 
 func (s *snapshotter) getCleanupDirectories(ctx context.Context) ([]string, error) {
@@ -707,7 +943,7 @@ func (s *snapshotter) getCleanupDirectories(ctx context.Context) ([]string, erro
 func (s *snapshotter) Remove(ctx context.Context, key string) (err error) {
 	var removals []string
 	var id string
-	fmt.Println("Remove called, key: ", key)
+	log.L.Debugf("Remove called, key: %s", key)
 	// Remove directories after the transaction is closed, failures must not
 	// return error since the transaction is committed with the removal
 	// key no longer available.
@@ -742,7 +978,7 @@ func (s *snapshotter) Remove(ctx context.Context, key string) (err error) {
 		}
 		// The layer blob is only persisted for committed snapshots.
 		if k == snapshots.KindCommitted {
-			fmt.Println("closing dmverity device for ", id)
+			log.L.Debugf("closing dmverity device for %v", id)
 			if err := s.closeDmverityDevice(id); err != nil {
 				log.G(ctx).WithError(err).Warnf("failed to close dmverity device for %v", id)
 			}
