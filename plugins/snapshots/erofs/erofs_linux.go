@@ -99,7 +99,7 @@ type LayerInfo struct {
 
 // readSignatures reads all signature files from the signature store directory
 // and builds a map of layer digest to layer info
-func (s *snapshotter) readSignatures() (map[string]LayerInfo, error) {
+func readSignatures() (map[string]LayerInfo, error) {
 	signatures := make(map[string]LayerInfo)
 
 	// Check if the signatures directory exists
@@ -280,7 +280,7 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 	}
 
 	// Load signatures (this will handle the case when directory doesn't exist)
-	signatures, err := s.readSignatures()
+	signatures, err := readSignatures()
 	if err != nil {
 		log.L.WithError(err).Warn("failed to read signatures, continuing without signature verification")
 	} else {
