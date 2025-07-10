@@ -85,6 +85,14 @@ type MetaStore interface {
 
 const signatureStore = "/var/lib/containerd/io.containerd.snapshotter.v1.erofs/signatures"
 
+// Label keys for EROFS snapshotter metadata
+const (
+	// ErofsRootHashLabel is the label key for the root hash of the EROFS layer
+	ErofsRootHashLabel = "containerd.io/snapshot/erofs.root-hash"
+	// ErofsSignatureLabel is the label key for the signature of the EROFS layer
+	ErofsSignatureLabel = "containerd.io/snapshot/erofs.signature"
+)
+
 // ImageInfo holds information about an image and its layers
 type ImageInfo struct {
 	Layers []LayerInfo `json:"layers"`
@@ -382,11 +390,11 @@ func (s *snapshotter) formatLayerBlob(ctx context.Context, id string, snapshotIn
 					if snapshotInfo.Labels == nil {
 						snapshotInfo.Labels = make(map[string]string)
 					}
-					snapshotInfo.Labels["containerd.io/snapshot/erofs.root-hash"] = info.RootHash
-					snapshotInfo.Labels["containerd.io/snapshot/erofs.signature"] = layerInfo.Signature
+					snapshotInfo.Labels[ErofsRootHashLabel] = info.RootHash
+					snapshotInfo.Labels[ErofsSignatureLabel] = layerInfo.Signature
 
-					updatedInfo, err := storage.UpdateInfo(ctx, snapshotInfo, "labels.containerd.io/snapshot/erofs.root-hash",
-						"labels.containerd.io/snapshot/erofs.signature")
+					updatedInfo, err := storage.UpdateInfo(ctx, snapshotInfo, "labels."+ErofsRootHashLabel,
+						"labels."+ErofsSignatureLabel)
 					if err != nil {
 						log.L.WithError(err).Warn("failed to update snapshot labels with signature")
 					} else {
@@ -461,7 +469,7 @@ func (s *snapshotter) runDmverity(ctx context.Context, id string) (string, error
 
 		log.L.Debugf("Labels from snapshot: %+v", snapshotInfo.Labels)
 
-		var signature = snapshotInfo.Labels["containerd.io/snapshot/erofs.signature"]
+		var signature = snapshotInfo.Labels[ErofsSignatureLabel]
 		if signature != "" {
 			log.L.Debugf("Found signature for %s: %s", id, signature)
 			// Prepare the signature file to be used with veritysetup
