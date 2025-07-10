@@ -370,7 +370,6 @@ func (s *snapshotter) formatLayerBlob(ctx context.Context, id string, snapshotIn
 			log.L.Debugf("snapshotInfo.Labels is nil")
 		}
 
-		log.L.Info("Before checking layerDigest s.signatures")
 		// If we have the layer digest and signatures map is available
 		if layerDigest != "" && s.signatures != nil {
 			// Check if the layer digest exists in our signatures map
@@ -745,12 +744,12 @@ func (s *snapshotter) createSnapshot(ctx context.Context, kind snapshots.Kind, k
 }
 
 func (s *snapshotter) Prepare(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
-	log.G(ctx).Infof("In Prepare for key: %s, parent: %s, opts: %v", key, parent, opts)
+	log.G(ctx).Tracef("In Prepare for key: %s, parent: %s, opts: %v", key, parent, opts)
 	return s.createSnapshot(ctx, snapshots.KindActive, key, parent, opts)
 }
 
 func (s *snapshotter) View(ctx context.Context, key, parent string, opts ...snapshots.Opt) ([]mount.Mount, error) {
-	log.G(ctx).Infof("In View for key: %s, parent: %s, opts: %v", key, parent, opts)
+	log.G(ctx).Tracef("In View for key: %s, parent: %s, opts: %v", key, parent, opts)
 	return s.createSnapshot(ctx, snapshots.KindView, key, parent, opts)
 }
 
@@ -787,7 +786,7 @@ func setImmutable(path string, enable bool) error {
 }
 
 func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snapshots.Opt) error {
-	log.G(ctx).Infof("In Commit for key: %s, name: %s, opts: %v", key, name, opts)
+	log.G(ctx).Tracef("In Commit for key: %s, name: %s, opts: %v", key, name, opts)
 
 	var layerBlob, upperDir string
 
@@ -887,7 +886,7 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 }
 
 func (s *snapshotter) Mounts(ctx context.Context, key string) (_ []mount.Mount, err error) {
-	log.G(ctx).Infof("In Mounts for key: %s", key)
+	log.G(ctx).Tracef("In Mounts for key: %s", key)
 
 	var snap storage.Snapshot
 	var info snapshots.Info
@@ -941,9 +940,10 @@ func (s *snapshotter) getCleanupDirectories(ctx context.Context) ([]string, erro
 // immediately become unavailable and unrecoverable. Disk space will
 // be freed up on the next call to `Cleanup`.
 func (s *snapshotter) Remove(ctx context.Context, key string) (err error) {
+	log.L.Tracef("Remove called, key: %s", key)
+
 	var removals []string
 	var id string
-	log.L.Debugf("Remove called, key: %s", key)
 	// Remove directories after the transaction is closed, failures must not
 	// return error since the transaction is committed with the removal
 	// key no longer available.
