@@ -167,11 +167,11 @@ func readSignatures(root string) (map[string]LayerInfo, error) {
 
 // prepareSignatureFile writes the signature bytes to a file that can be used with veritysetup
 // Reference: https://man7.org/linux/man-pages/man8/veritysetup.8.html
-func (s *snapshotter) prepareSignatureFile(hash, signature string) (string, error) {
+func (s *snapshotter) prepareSignatureFile(hash, signatureBase64 string) (string, error) {
 	log.L.Debugf("Preparing signature file for root hash %s", hash)
 
 	// Decode the base64 encoded signature
-	signatureBytes, err := base64.StdEncoding.DecodeString(signature)
+	signatureBytes, err := base64.StdEncoding.DecodeString(signatureBase64)
 	if err != nil {
 		return "", fmt.Errorf("failed to decode signature: %w", err)
 	}
@@ -438,7 +438,7 @@ func (s *snapshotter) runDmverity(ctx context.Context, id string) (string, error
 	}
 
 	// Prepare signature file if a signature is available
-	rootHashSignatureFile, err := s.prepareSnapshotSignature(ctx, id, rootHash)
+	rootHashSignaturePath, err := s.prepareSnapshotSignature(ctx, id, rootHash)
 	if err != nil {
 		return "", err
 	}
@@ -448,11 +448,11 @@ func (s *snapshotter) runDmverity(ctx context.Context, id string) (string, error
 		opts := dmverity.DefaultDmverityOptions()
 		opts.HashOffset = originalSize
 
-		if rootHashSignatureFile != "" {
-			log.L.Debugf("Using signature file %s for root hash %s", rootHashSignatureFile, rootHash)
-			// The rootHashSignatureFile now contains the path to the signature file
+		if rootHashSignaturePath != "" {
+			log.L.Debugf("Using signature file %s for root hash %s", rootHashSignaturePath, rootHash)
+			// The rootHashSignaturePath now contains the path to the signature file
 			// We'll pass the file path to be used with --root-hash-signature by veritysetup
-			opts.RootHashSignature = rootHashSignatureFile
+			opts.RootHashSignaturePath = rootHashSignaturePath
 		}
 
 		_, err = dmverity.Open(layerBlob, dmName, layerBlob, string(rootHash), &opts)
@@ -1118,7 +1118,7 @@ func (s *snapshotter) prepareSnapshotSignature(ctx context.Context, id string, r
 		return "", nil // No signatures available
 	}
 
-	var rootHashSignatureFile string = ""
+	var rootHashSignaturePath string = ""
 	var snapshotInfo snapshots.Info
 
 	if err := s.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
@@ -1146,14 +1146,14 @@ func (s *snapshotter) prepareSnapshotSignature(ctx context.Context, id string, r
 		log.L.Debugf("Found signature for %s: %s", id, signature)
 		// Prepare the signature file to be used with veritysetup
 		var err error
-		rootHashSignatureFile, err = s.prepareSignatureFile(rootHash, signature)
+		rootHashSignaturePath, err = s.prepareSignatureFile(rootHash, signature)
 		if err != nil {
 			return "", fmt.Errorf("failed to prepare signature file for root hash %s: %w", rootHash, err)
 		}
-		log.L.Debugf("Prepared signature file for root hash %s at %s", rootHash, rootHashSignatureFile)
+		log.L.Debugf("Prepared signature file for root hash %s at %s", rootHash, rootHashSignaturePath)
 	} else {
 		log.L.Debugf("No signature found for root hash %s in snapshot labels", rootHash)
 	}
 
-	return rootHashSignatureFile, nil
+	return rootHashSignaturePath, nil
 }

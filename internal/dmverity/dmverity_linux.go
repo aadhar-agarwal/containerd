@@ -87,8 +87,8 @@ func actions(cmd VeritySetupCommand, args []string, opts *DmverityOptions) (stri
 	}
 
 	// --root-hash-signature is only applicable for veritysetup open command
-	if cmd == OpenCommand && opts.RootHashSignature != "" {
-		cmdArgs = append(cmdArgs, fmt.Sprintf("--root-hash-signature=%s", opts.RootHashSignature))
+	if cmd == OpenCommand && opts.RootHashSignaturePath != "" {
+		cmdArgs = append(cmdArgs, fmt.Sprintf("--root-hash-signature=%s", opts.RootHashSignaturePath))
 	}
 
 	cmdArgs = append(cmdArgs, args...)
