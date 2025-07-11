@@ -285,10 +285,8 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		ovlOptions:     config.ovlOptions,
 		enableFsverity: config.enableFsverity,
 		enableDmverity: config.enableDmverity,
+		signatures:     make(map[string]LayerInfo),
 	}
-
-	// Initialize signatures map (will be empty by default)
-	s.signatures = make(map[string]LayerInfo)
 
 	// Load signatures if available
 	signatures, err := readSignatures(root)
@@ -1063,7 +1061,7 @@ func getLayerDigestFromLabels(labels map[string]string) (string, error) {
 
 	digest, ok := labels[snapshotters.TargetLayerDigestLabel]
 	if !ok {
-		return "", fmt.Errorf("target layer digest label not found in snapshot labels")
+		return "", fmt.Errorf("target layer digest label '%s' not found in snapshot labels", snapshotters.TargetLayerDigestLabel)
 	}
 
 	return digest, nil
