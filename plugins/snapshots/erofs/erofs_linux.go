@@ -131,8 +131,9 @@ func readSignatures(root string) (map[string]LayerInfo, error) {
 
 	// Process each signature file
 	for _, file := range files {
-		// Skip directories
-		if file.IsDir() {
+		// Skip directories and non-regular files (symlinks, pipes, devices, etc.)
+		if !file.Type().IsRegular() {
+			log.L.Debugf("skipping non-regular file %s", file.Name())
 			continue
 		}
 
