@@ -59,7 +59,9 @@ type DmverityOptions struct {
 	Debug bool
 	// UUID for device to use
 	UUID string
-	// Root hash signature for verification
+	// RootHashSignature specifies the path to a file containing the binary signature
+	// for the root hash. This file is passed to veritysetup using the --root-hash-signature option.
+	// The file should contain the raw binary signature data (not base64 encoded).
 	RootHashSignature string
 }
 
@@ -157,7 +159,7 @@ type StatusInfo struct {
 	InUse bool
 	// Type of the device (e.g., "VERITY")
 	Type string
-	// Status of verification (e.g., "verified", "verified (with signature)")
+	// Status of verification (e.g., "verified" or "verified (with signature)")
 	Status string
 }
 
