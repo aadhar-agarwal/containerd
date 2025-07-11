@@ -83,14 +83,14 @@ type MetaStore interface {
 	Close() error
 }
 
-const signatureStore = "/var/lib/containerd/io.containerd.snapshotter.v1.erofs/signatures"
-
 // Label keys for EROFS snapshotter metadata
 const (
 	// ErofsRootHashLabel is the label key for the root hash of the EROFS layer
 	ErofsRootHashLabel = "containerd.io/snapshot/erofs.root-hash"
 	// ErofsSignatureLabel is the label key for the signature of the EROFS layer
 	ErofsSignatureLabel = "containerd.io/snapshot/erofs.signature"
+	// Default signatures directory relative to root
+	SignaturesDir = "signatures"
 )
 
 // ImageInfo holds information about an image and its layers
@@ -107,21 +107,24 @@ type LayerInfo struct {
 
 // readSignatures reads all signature files from the signature store directory
 // and builds a map of layer digest to layer info
-func readSignatures() (map[string]LayerInfo, error) {
+func readSignatures(root string) (map[string]LayerInfo, error) {
 	signatures := make(map[string]LayerInfo)
 
+	// Get signature store path relative to the provided root
+	signatureStorePath := filepath.Join(root, SignaturesDir)
+
 	// Check if the signatures directory exists
-	if _, err := os.Stat(signatureStore); err != nil {
+	if _, err := os.Stat(signatureStorePath); err != nil {
 		if os.IsNotExist(err) {
 			// Directory doesn't exist, return empty signatures map
-			log.L.Debugf("signatures directory %s does not exist, skipping signature loading", signatureStore)
+			log.L.Debugf("signatures directory %s does not exist, skipping signature loading", signatureStorePath)
 			return signatures, nil
 		}
 		return nil, fmt.Errorf("failed to access signature store directory: %w", err)
 	}
 
 	// Read all files from the signature store directory
-	files, err := os.ReadDir(signatureStore)
+	files, err := os.ReadDir(signatureStorePath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read signature store directory: %w", err)
 	}
@@ -134,7 +137,7 @@ func readSignatures() (map[string]LayerInfo, error) {
 		}
 
 		// Read the signature file content
-		sigPath := filepath.Join(signatureStore, file.Name())
+		sigPath := filepath.Join(signatureStorePath, file.Name())
 		sigContent, err := os.ReadFile(sigPath)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read signature file %s: %w", sigPath, err)
@@ -179,7 +182,7 @@ func (s *snapshotter) prepareSignatureFile(hash, signature string) (string, erro
 
 	// Write the signature bytes to a file that can be used with veritysetup
 	// Create directory if it doesn't exist
-	sigDir := filepath.Join(s.root, "signatures")
+	sigDir := filepath.Join(s.root, SignaturesDir)
 	if err := os.MkdirAll(sigDir, 0700); err != nil {
 		return "", fmt.Errorf("failed to create signature directory: %w", err)
 	}
@@ -288,7 +291,7 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 	}
 
 	// Load signatures (this will handle the case when directory doesn't exist)
-	signatures, err := readSignatures()
+	signatures, err := readSignatures(root)
 	if err != nil {
 		log.L.WithError(err).Warn("failed to read signatures, continuing without signature verification")
 	} else {
