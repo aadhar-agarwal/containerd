@@ -162,10 +162,6 @@ func readSignatures(root string) (map[string]LayerInfo, error) {
 		}
 	}
 
-	if len(signatures) > 0 {
-		log.L.Debugf("loaded %d signatures", len(signatures))
-	}
-
 	return signatures, nil
 }
 
@@ -290,12 +286,18 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		enableDmverity: config.enableDmverity,
 	}
 
-	// Load signatures (this will handle the case when directory doesn't exist)
+	// Initialize signatures map (will be empty by default)
+	s.signatures = make(map[string]LayerInfo)
+
+	// Load signatures if available
 	signatures, err := readSignatures(root)
 	if err != nil {
 		log.L.WithError(err).Warn("failed to read signatures, continuing without signature verification")
-	} else {
+	} else if len(signatures) > 0 {
 		s.signatures = signatures
+		log.L.Debugf("initialized with %d signatures", len(signatures))
+	} else {
+		log.L.Debug("no signatures found, continuing without signature verification")
 	}
 
 	return s, nil
@@ -435,40 +437,10 @@ func (s *snapshotter) runDmverity(ctx context.Context, id string) (string, error
 		}
 	}
 
-	var rootHashSignatureFile string = ""
-	var snapshotInfo snapshots.Info
-	if s.signatures != nil {
-		if err := s.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
-			var key, key_err = storage.KeyFromID(ctx, id)
-			if key_err != nil {
-				return fmt.Errorf("failed to get snapshot key from ID: %w", key_err)
-			}
-			log.L.Debugf("Key for snapshot %s: %s", id, key)
-			var snapshotInfoErr error
-			snapshotInfo, snapshotInfoErr = s.Stat(ctx, key)
-			if snapshotInfoErr != nil {
-				return fmt.Errorf("failed to get snapshot info: %w", snapshotInfoErr)
-			}
-			log.L.Debugf("Snapshot info for %s: %+v", id, snapshotInfo)
-			return nil
-		}); err != nil {
-			return "", err
-		}
-
-		log.L.Debugf("Labels from snapshot: %+v", snapshotInfo.Labels)
-
-		// Extract signature from labels and prepare signature file if available
-		if signature, exists := snapshotInfo.Labels[ErofsSignatureLabel]; exists && signature != "" {
-			log.L.Debugf("Found signature for %s: %s", id, signature)
-			// Prepare the signature file to be used with veritysetup
-			rootHashSignatureFile, err = s.prepareSignatureFile(rootHash, signature)
-			if err != nil {
-				return "", fmt.Errorf("failed to prepare signature file for root hash %s: %w", rootHash, err)
-			}
-			log.L.Debugf("Prepared signature file for root hash %s at %s", rootHash, rootHashSignatureFile)
-		} else {
-			log.L.Debugf("No signature found for root hash %s in snapshot labels", rootHash)
-		}
+	// Prepare signature file if a signature is available
+	rootHashSignatureFile, err := s.prepareSnapshotSignature(ctx, id, rootHash)
+	if err != nil {
+		return "", err
 	}
 
 	if _, err := os.Stat(devicePath); err != nil {
@@ -1100,9 +1072,8 @@ func getLayerDigestFromLabels(labels map[string]string) (string, error) {
 // Returns the signature if found and verified, or empty string if no signature was found
 // Returns an error ONLY if the root hashes don't match
 func findMatchingSignature(signatures map[string]LayerInfo, layerDigest string, calculatedRootHash string) (string, error) {
-	if signatures == nil {
-		log.L.Debugf("no signatures available")
-		return "", nil
+	if len(signatures) == 0 {
+		return "", nil // No signatures available
 	}
 
 	// Check if the layer digest exists in our signatures map
@@ -1124,11 +1095,6 @@ func findMatchingSignature(signatures map[string]LayerInfo, layerDigest string, 
 
 // updateSnapshotLabelsWithSignature updates the snapshot labels with root hash and signature information
 func updateSnapshotLabelsWithSignature(ctx context.Context, info snapshots.Info, rootHash, signature string) error {
-	// Ensure we have a labels map
-	if info.Labels == nil {
-		info.Labels = make(map[string]string)
-	}
-
 	// Update labels with root hash and signature
 	info.Labels[ErofsRootHashLabel] = rootHash
 	info.Labels[ErofsSignatureLabel] = signature
@@ -1142,4 +1108,52 @@ func updateSnapshotLabelsWithSignature(ctx context.Context, info snapshots.Info,
 
 	log.L.Debugf("Updated snapshot labels with signature and root hash: %v", updatedInfo.Labels)
 	return nil
+}
+
+// prepareSnapshotSignature retrieves a snapshot's signature from its labels and prepares
+// a signature file for dm-verity verification.
+// Returns the path to the prepared signature file, or empty string if no signature is found.
+func (s *snapshotter) prepareSnapshotSignature(ctx context.Context, id string, rootHash string) (string, error) {
+	if len(s.signatures) == 0 {
+		return "", nil // No signatures available
+	}
+
+	var rootHashSignatureFile string = ""
+	var snapshotInfo snapshots.Info
+
+	if err := s.ms.WithTransaction(ctx, false, func(ctx context.Context) error {
+		var key, key_err = storage.KeyFromID(ctx, id)
+		if key_err != nil {
+			return fmt.Errorf("failed to get snapshot key from ID: %w", key_err)
+		}
+		log.L.Debugf("Key for snapshot %s: %s", id, key)
+
+		var snapshotInfoErr error
+		snapshotInfo, snapshotInfoErr = s.Stat(ctx, key)
+		if snapshotInfoErr != nil {
+			return fmt.Errorf("failed to get snapshot info: %w", snapshotInfoErr)
+		}
+		log.L.Debugf("Snapshot info for %s: %+v", id, snapshotInfo)
+		return nil
+	}); err != nil {
+		return "", err
+	}
+
+	log.L.Debugf("Labels from snapshot: %+v", snapshotInfo.Labels)
+
+	// Extract signature from labels and prepare signature file if available
+	if signature, exists := snapshotInfo.Labels[ErofsSignatureLabel]; exists && signature != "" {
+		log.L.Debugf("Found signature for %s: %s", id, signature)
+		// Prepare the signature file to be used with veritysetup
+		var err error
+		rootHashSignatureFile, err = s.prepareSignatureFile(rootHash, signature)
+		if err != nil {
+			return "", fmt.Errorf("failed to prepare signature file for root hash %s: %w", rootHash, err)
+		}
+		log.L.Debugf("Prepared signature file for root hash %s at %s", rootHash, rootHashSignatureFile)
+	} else {
+		log.L.Debugf("No signature found for root hash %s in snapshot labels", rootHash)
+	}
+
+	return rootHashSignatureFile, nil
 }
