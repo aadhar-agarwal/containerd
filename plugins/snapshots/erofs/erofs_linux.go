@@ -368,45 +368,30 @@ func (s *snapshotter) formatLayerBlob(ctx context.Context, id string, snapshotIn
 			return fmt.Errorf("failed to write dmverity root hash: %w", err)
 		}
 
-		var layerDigest string = ""
-		if snapshotInfo.Labels != nil {
-			if digest, ok := snapshotInfo.Labels[snapshotters.TargetLayerDigestLabel]; ok {
-				layerDigest = digest
-				log.L.Infof("found layer digest in labels: %s", layerDigest)
-			}
-		} else {
-			log.L.Debugf("snapshotInfo.Labels is nil")
+		// Extract layer digest from snapshot labels
+		layerDigest, err := getLayerDigestFromLabels(snapshotInfo.Labels)
+		if err != nil {
+			// Error out if the layer digest is not found
+			return fmt.Errorf("missing target layer digest label: %w", err)
+		}
+		log.L.Debugf("found target layer digest in labels: %s", layerDigest)
+
+		// Try to find a matching signature and verify its root hash
+		signature, err := findMatchingSignature(s.signatures, layerDigest, info.RootHash)
+		if err != nil {
+			return fmt.Errorf("failed to verify signature for layer %s: %w", layerDigest, err)
 		}
 
-		// If we have the layer digest and signatures map is available
-		if layerDigest != "" && s.signatures != nil {
-			// Check if the layer digest exists in our signatures map
-			if layerInfo, ok := s.signatures[layerDigest]; ok {
-				// Check if the calculated root hash matches the one in the signature
-				if layerInfo.RootHash == info.RootHash {
-					log.L.Debugf("root hash from signature matches calculated root hash: %s", info.RootHash)
-
-					// Store the signature in the snapshot labels using the existing transaction context
-					if snapshotInfo.Labels == nil {
-						snapshotInfo.Labels = make(map[string]string)
-					}
-					snapshotInfo.Labels[ErofsRootHashLabel] = info.RootHash
-					snapshotInfo.Labels[ErofsSignatureLabel] = layerInfo.Signature
-
-					updatedInfo, err := storage.UpdateInfo(ctx, snapshotInfo, "labels."+ErofsRootHashLabel,
-						"labels."+ErofsSignatureLabel)
-					if err != nil {
-						log.L.WithError(err).Warn("failed to update snapshot labels with signature")
-					} else {
-						log.L.Debugf("Updated snapshot labels with signature and root hash: %v", updatedInfo.Labels)
-					}
-				} else {
-					log.L.Errorf("root hash mismatch: calculated %s vs expected %s",
-						info.RootHash, layerInfo.RootHash)
-				}
-			} else {
-				log.L.Debugf("no signature found for layer digest: %s", layerDigest)
+		// Update the snapshot labels only if a signature was found
+		if signature != "" {
+			updatedInfoErr := updateSnapshotLabelsWithSignature(ctx, snapshotInfo, info.RootHash, signature)
+			if updatedInfoErr != nil {
+				// Error out if updating labels fails
+				return fmt.Errorf("failed to update snapshot labels with signature info: %w", updatedInfoErr)
 			}
+			log.L.Debugf("Updated snapshot with verified signature")
+		} else {
+			log.L.Debugf("No signature found for layer digest %s, continuing without signature verification", layerDigest)
 		}
 	}
 	return nil
@@ -469,8 +454,8 @@ func (s *snapshotter) runDmverity(ctx context.Context, id string) (string, error
 
 		log.L.Debugf("Labels from snapshot: %+v", snapshotInfo.Labels)
 
-		var signature = snapshotInfo.Labels[ErofsSignatureLabel]
-		if signature != "" {
+		// Extract signature from labels and prepare signature file if available
+		if signature, exists := snapshotInfo.Labels[ErofsSignatureLabel]; exists && signature != "" {
 			log.L.Debugf("Found signature for %s: %s", id, signature)
 			// Prepare the signature file to be used with veritysetup
 			rootHashSignatureFile, err = s.prepareSignatureFile(rootHash, signature)
@@ -1089,5 +1074,69 @@ func (s *snapshotter) closeDmverityDevice(id string) error {
 		_, err = dmverity.Close(dmName)
 		return err
 	}
+	return nil
+}
+
+// getLayerDigestFromLabels extracts the layer digest from snapshot labels
+// Returns the layer digest if found
+// Returns an error if the labels are nil or if the digest label is not found
+func getLayerDigestFromLabels(labels map[string]string) (string, error) {
+	if labels == nil {
+		return "", fmt.Errorf("snapshot labels are nil, cannot find layer digest")
+	}
+
+	digest, ok := labels[snapshotters.TargetLayerDigestLabel]
+	if !ok {
+		return "", fmt.Errorf("target layer digest label not found in snapshot labels")
+	}
+
+	return digest, nil
+}
+
+// findMatchingSignature looks for a matching signature for the layer digest and verifies the root hash
+// Returns the signature if found and verified, or empty string if no signature was found
+// Returns an error ONLY if the root hashes don't match
+func findMatchingSignature(signatures map[string]LayerInfo, layerDigest string, calculatedRootHash string) (string, error) {
+	if signatures == nil {
+		log.L.Debugf("no signatures available")
+		return "", nil
+	}
+
+	// Check if the layer digest exists in our signatures map
+	layerInfo, ok := signatures[layerDigest]
+	if !ok {
+		log.L.Debugf("no signature found for layer digest: %s", layerDigest)
+		return "", nil
+	}
+
+	// Verify that the calculated root hash matches the one in the signature
+	if layerInfo.RootHash != calculatedRootHash {
+		return "", fmt.Errorf("root hash mismatch: calculated %s vs expected %s",
+			calculatedRootHash, layerInfo.RootHash)
+	}
+
+	log.L.Debugf("root hash from signature matches calculated root hash: %s", calculatedRootHash)
+	return layerInfo.Signature, nil
+}
+
+// updateSnapshotLabelsWithSignature updates the snapshot labels with root hash and signature information
+func updateSnapshotLabelsWithSignature(ctx context.Context, info snapshots.Info, rootHash, signature string) error {
+	// Ensure we have a labels map
+	if info.Labels == nil {
+		info.Labels = make(map[string]string)
+	}
+
+	// Update labels with root hash and signature
+	info.Labels[ErofsRootHashLabel] = rootHash
+	info.Labels[ErofsSignatureLabel] = signature
+
+	// Update the info in storage
+	updatedInfo, err := storage.UpdateInfo(ctx, info, "labels."+ErofsRootHashLabel, "labels."+ErofsSignatureLabel)
+	if err != nil {
+		log.L.WithError(err).Warn("failed to update snapshot labels with signature")
+		return err
+	}
+
+	log.L.Debugf("Updated snapshot labels with signature and root hash: %v", updatedInfo.Labels)
 	return nil
 }
