@@ -12,11 +12,14 @@ func main() {
 	// Define command-line flags
 	var targetFunctions string
 	var listOnly bool
+	var testMode string
 
 	flag.StringVar(&targetFunctions, "funcs", "", "Comma-separated list of function names to generate tests for (e.g., 'Function1,Function2')")
 	flag.StringVar(&targetFunctions, "f", "", "Comma-separated list of function names to generate tests for (short form)")
 	flag.BoolVar(&listOnly, "list", false, "Only list available functions without generating tests")
 	flag.BoolVar(&listOnly, "l", false, "Only list available functions without generating tests (short form)")
+	flag.StringVar(&testMode, "mode", "simple", "Test generation mode: 'simple' or 'test_and_run'")
+	flag.StringVar(&testMode, "m", "simple", "Test generation mode: 'simple' or 'test_and_run' (short form)")
 
 	// Parse flags but leave os.Args[0] which is the program name
 	flag.CommandLine.Parse(os.Args[1:])
@@ -27,10 +30,12 @@ func main() {
 		fmt.Printf("\nOptions:\n")
 		fmt.Printf("  -funcs, -f <names>    Comma-separated list of function names to generate tests for\n")
 		fmt.Printf("  -list, -l             Only list available functions without generating tests\n")
+		fmt.Printf("  -mode, -m <mode>      Test generation mode: 'simple' (default) or 'test_and_run'\n")
 		fmt.Printf("\nExamples:\n")
 		fmt.Printf("  erospector /path/to/file.go                       Generate tests for all functions\n")
 		fmt.Printf("  erospector -list /path/to/file.go                 List all functions without generating tests\n")
 		fmt.Printf("  erospector -f Func1,Func2 /path/to/file.go        Generate tests only for Func1 and Func2\n")
+		fmt.Printf("  erospector -m test_and_run /path/to/file.go       Generate tests with iterative improvement\n")
 		return
 	}
 
@@ -117,20 +122,24 @@ func main() {
 	}
 	fileCodeString := string(fileContent)
 
-	for _, fn := range funcs {
-		fmt.Printf("Generating test for %s...\n", fn.Name)
-		testCode, err := AskGPTForTestPython(fn.Name, fileCodeString, primer)
-		if err != nil {
-			fmt.Printf("Error from GPT for %s: %v\n", fn.Name, err)
-			continue
-		}
-
-		err = WriteTestFile(filePath, fn.Name, testCode)
-		if err != nil {
-			fmt.Printf("File write error: %v\n", err)
-			continue
-		}
-
-		fmt.Printf("Test written for %s\n", fn.Name)
+	// Validate test mode
+	if testMode != "simple" && testMode != "test_and_run" {
+		fmt.Printf("Error: Invalid test mode '%s'. Must be 'simple' or 'test_and_run'\n", testMode)
+		return
 	}
+
+	fmt.Printf("Using test generation mode: %s\n", testMode)
+
+	testCode, err := AskGPTForTestPythonWithMode(fileCodeString, primer, testMode, filePath)
+	if err != nil {
+		fmt.Printf("Error from GPT: %s\n", err)
+		return
+	}
+
+	_, err = WriteTestFile(filePath, testCode)
+	if err != nil {
+		fmt.Printf("File write error: %s\n", err)
+		return
+	}
+	fmt.Printf("Test written\n")
 }
