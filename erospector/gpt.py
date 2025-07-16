@@ -51,7 +51,9 @@ def run_go_tests_with_code(source_file_code: str, test_file_code: str, source_fi
                 timeout=30,
             )
             
-            # Parse coverage % from go tool output
+            # Parse coverage % from go tool output and get detailed coverage info
+            coverage = 0.0
+            detailed_coverage = ""
             try:
                 cov = subprocess.run(
                     ["go", "tool", "cover", "-func=cover.out"],
@@ -59,6 +61,7 @@ def run_go_tests_with_code(source_file_code: str, test_file_code: str, source_fi
                     capture_output=True,
                     text=True,
                 )
+                detailed_coverage = cov.stdout
                 match = re.search(r"total:\s+\(statements\)\s+([\d.]+)%", cov.stdout)
                 coverage = float(match.group(1)) if match else 0.0
             except Exception:
@@ -68,6 +71,7 @@ def run_go_tests_with_code(source_file_code: str, test_file_code: str, source_fi
                 "stdout": result.stdout,
                 "stderr": result.stderr,
                 "coverage_percent": coverage,
+                "detailed_coverage": detailed_coverage,
                 "returncode": result.returncode,
                 "test_file_path": test_file_path
             }
@@ -138,20 +142,20 @@ Please simplify the tests as much as possible.
             {"role": "user", "content": primer},
             {"role": "user", "content": prompt}
         ],
-        # input=[{"role": "user", "content": "Once the test is generated, run the go tests, and fix any issues until the tests run."}],
-        # tools=tools
     )
     return response.choices[0].message.content
 
 def ask_gpt_for_test_and_run(file_code, primer, source_file_path=None):
-    """Generate a test for the whole file using GPT with iterative testing"""
+    """Generate a test for the whole file using GPT with iterative testing and coverage improvement"""
     client = get_client()
-
+    target_coverage = 70.0
+    max_iterations = 5
+    
     tools = [{
         "type": "function",
         "function": {
             "name": "run_go_tests_with_code",
-            "description": "Run Go tests and return the results.",
+            "description": "Run Go tests and return the results including coverage percentage.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -182,65 +186,102 @@ def ask_gpt_for_test_and_run(file_code, primer, source_file_path=None):
 Here is the full Go file content:
 {file_code}
 
-Please generate unit tests for the entire file.
+Please generate comprehensive unit tests for the entire file to achieve at least {target_coverage}% code coverage.
 Do not mock out any dependencies.
-Please simplify the tests as much as possible.
+Please simplify the tests as much as possible while ensuring good coverage.
 
 IMPORTANT: After generating the test code, you MUST use the run_go_tests_with_code function to test it immediately. 
 Call the function with the original source code, your generated test code, and the source file path: {source_file_path}
-If there are any errors, fix them and run the tests again until they pass.
-Do not ask for permission - just run the tests automatically.
+If there are any errors, fix them and run the tests again. Please make sure all the tests pass!
+If the coverage is below {target_coverage}%, analyze the detailed coverage report and add more tests to cover untested code paths.
+Do not ask for permission - just run the tests automatically and iterate until coverage is satisfactory.
 """
     
     messages = [
-        {"role": "system", "content": "You are a Go expert writing unit tests for containerd. You MUST run tests automatically using the run_go_tests_with_code function after generating test code. Do not ask for permission. In addition, fix any issues until the tests run successfully"},
+        {"role": "system", "content": f"You are a Go expert writing unit tests for containerd. Your goal is to achieve at least {target_coverage}% code coverage. You MUST run tests automatically using the run_go_tests_with_code function after generating test code. Do not ask for permission. Analyze coverage reports and iteratively improve tests until coverage target is met."},
         {"role": "user", "content": "Here is some relevant code and tests to understand before writing any tests:"},
         {"role": "user", "content": primer},
         {"role": "user", "content": prompt}
     ]
     
-    response = client.chat.completions.create(
-        model="gpt-4.1",
-        messages=messages,
-        tools=tools
-    )
+    iteration = 0
+    current_coverage = 0.0
     
-    # Handle function calls if the model wants to use tools
-    if response.choices[0].message.tool_calls:
-        # Add the assistant's response to messages
-        messages.append(response.choices[0].message)
+    while iteration < max_iterations:
+        iteration += 1
+        # print(f"Coverage iteration {iteration}/{max_iterations}", file=sys.stderr)
         
-        # Process each tool call
-        for tool_call in response.choices[0].message.tool_calls:
-            if tool_call.function.name == "run_go_tests_with_code":
-                # Parse the function arguments
-                args = json.loads(tool_call.function.arguments)
-                
-                # Execute the function with code strings and source file path
-                result = run_go_tests_with_code(
-                    args["source_file_code"], 
-                    args["test_file_code"],
-                    args.get("source_file_path", source_file_path)
-                )
-
-                # Add the function result to messages
-                messages.append({
-                    "role": "tool",
-                    "content": json.dumps(result),
-                    "tool_call_id": tool_call.id
-                })
-        
-        # Get the final response after function execution
-        final_response = client.chat.completions.create(
+        response = client.chat.completions.create(
             model="gpt-4.1",
-            messages=messages + [{
-                "role": "user",
-                "content": "Please provide the final, corrected test code as a complete Go test file. Do not describe what you did - just provide the working code."
-            }],
+            messages=messages,
             tools=tools
         )
         
-        return final_response.choices[0].message.content
+        # Handle function calls if the model wants to use tools
+        if response.choices[0].message.tool_calls:
+            # Add the assistant's response to messages
+            messages.append(response.choices[0].message)
+            
+            # Process each tool call
+            for tool_call in response.choices[0].message.tool_calls:
+                if tool_call.function.name == "run_go_tests_with_code":
+                    # Parse the function arguments
+                    args = json.loads(tool_call.function.arguments)
+                    
+                    # Execute the function with code strings and source file path
+                    result = run_go_tests_with_code(
+                        args["source_file_code"], 
+                        args["test_file_code"],
+                        args.get("source_file_path", source_file_path)
+                    )
+                    
+                    current_coverage = result.get("coverage_percent", 0.0)
+                    # print(f"Current coverage: {current_coverage}%", file=sys.stderr)
+
+                    # Add the function result to messages
+                    messages.append({
+                        "role": "tool",
+                        "content": json.dumps(result),
+                        "tool_call_id": tool_call.id
+                    })
+            
+            # Check if we've achieved target coverage
+            if current_coverage >= target_coverage:
+                # print(f"Target coverage of {target_coverage}% achieved! Final coverage: {current_coverage}%", file=sys.stderr)
+                # Get the final response with the working code
+                final_response = client.chat.completions.create(
+                    model="gpt-4.1",
+                    messages=messages + [{
+                        "role": "user",
+                        "content": "Excellent! You have achieved the target coverage. Please provide the final, complete test code."
+                    }],
+                    tools=tools
+                )
+                return final_response.choices[0].message.content
+            else:
+                # Continue iterating to improve coverage
+                messages.append({
+                    "role": "user",
+                    "content": f"Current coverage is {current_coverage}%, which is below the target of {target_coverage}%. Please analyze the detailed coverage report and add more tests to cover the untested code paths. Focus on testing edge cases, error conditions, and any uncovered branches or functions."
+                })
+        else:
+            # No function calls made in first attempt, break and return what we have
+            break
+    
+    # If we've exhausted iterations or no function calls were made
+    # print(f"Completed {iteration} iterations. Final coverage: {current_coverage}%", file=sys.stderr)
+    
+    # Get the final response after all iterations
+    final_response = client.chat.completions.create(
+        model="gpt-4.1",
+        messages=messages + [{
+            "role": "user",
+            "content": "Please provide the final, corrected test code as a complete Go test file. Do not describe what you did - just provide the working code."
+        }],
+        tools=tools
+    )
+    
+    return final_response.choices[0].message.content
     # else:
     #     # No function calls were made, let's force a test run
     #     # Extract the test code from the response and run it
@@ -271,7 +312,7 @@ Do not ask for permission - just run the tests automatically.
 def main():
     """Main function to handle file input"""
     if len(sys.argv) != 2:
-        print(json.dumps({"error": "Usage: python gpt.py <input_file_path>"}))
+        # print(json.dumps({"error": "Usage: python gpt.py <input_file_path>"}))
         return 1
     
     input_file_path = sys.argv[1]
