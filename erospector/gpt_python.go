@@ -168,9 +168,9 @@ func AskGPTForTestPythonWithMode(fileCode string, primer string, mode string, so
 
 	// Run the Python script with the input file path as argument
 	cmd := exec.Command("python3", scriptPath, inputFile.Name())
-	output, err := cmd.CombinedOutput()
+	output, err := cmd.Output()
 	if err != nil {
-		return "", errors.New("Error executing Python script: " + err.Error() + "\nOutput: " + string(output))
+		return "", errors.New("Error executing Python script: " + err.Error())
 	}
 
 	// Parse the JSON response
