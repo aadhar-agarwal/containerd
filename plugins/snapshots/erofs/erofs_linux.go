@@ -89,8 +89,10 @@ const (
 	ErofsRootHashLabel = "containerd.io/snapshot/erofs.root-hash"
 	// ErofsSignatureLabel is the label key for the signature of the EROFS layer
 	ErofsSignatureLabel = "containerd.io/snapshot/erofs.signature"
-	// Default signatures directory relative to root
+	// Default signatures directory relative to root (for JSON metadata files)
 	SignaturesDir = "signatures"
+	// Directory for binary signature files relative to root used by dm-verity
+	SignatureBinaryFilesDir = "signature-binary-files"
 )
 
 // ImageInfo holds information about an image and its layers
@@ -171,21 +173,29 @@ func readSignatures(root string) (map[string]LayerInfo, error) {
 func (s *snapshotter) prepareSignatureFile(hash, signatureBase64 string) (string, error) {
 	log.L.Debugf("Preparing signature file for root hash %s", hash)
 
-	// Decode the base64 encoded signature
-	signatureBytes, err := base64.StdEncoding.DecodeString(signatureBase64)
-	if err != nil {
-		return "", fmt.Errorf("failed to decode signature: %w", err)
-	}
-
-	// Write the signature bytes to a file that can be used with veritysetup
 	// Create directory if it doesn't exist
-	sigDir := filepath.Join(s.root, SignaturesDir)
+	sigDir := filepath.Join(s.root, SignatureBinaryFilesDir)
 	if err := os.MkdirAll(sigDir, 0700); err != nil {
 		return "", fmt.Errorf("failed to create signature directory: %w", err)
 	}
 
 	// Create a file to store the signature bytes
 	sigPath := filepath.Join(sigDir, fmt.Sprintf("%s.sig", hash))
+
+	// Check if the signature file already exists
+	if _, err := os.Stat(sigPath); err == nil {
+		log.L.Debugf("Signature file already exists at %s", sigPath)
+		return sigPath, nil
+	} else if !os.IsNotExist(err) {
+		return "", fmt.Errorf("failed to check if signature file exists: %w", err)
+	}
+
+	// Decode the base64 encoded signature
+	signatureBytes, err := base64.StdEncoding.DecodeString(signatureBase64)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode signature: %w", err)
+	}
+
 	if err := os.WriteFile(sigPath, signatureBytes, 0644); err != nil {
 		return "", fmt.Errorf("failed to write signature to file: %w", err)
 	}
