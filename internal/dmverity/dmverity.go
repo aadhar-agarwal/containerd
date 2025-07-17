@@ -59,17 +59,22 @@ type DmverityOptions struct {
 	Debug bool
 	// UUID for device to use
 	UUID string
+	// RootHashSignaturePath specifies the path to a file containing the binary signature
+	// for the root hash. This file is passed to veritysetup using the --root-hash-signature option.
+	// The file should contain the raw binary signature data (not base64 encoded).
+	RootHashSignaturePath string
 }
 
 // DefaultDmverityOptions returns a DmverityOptions struct with default values
 func DefaultDmverityOptions() DmverityOptions {
 	return DmverityOptions{
-		HashAlgorithm: "sha256",
-		DataBlockSize: 512,
-		HashBlockSize: 512,
-		HashType:      1,
-		UseSuperblock: true,
-		Salt:          "0000000000000000000000000000000000000000000000000000000000000000",
+		HashAlgorithm:         "sha256",
+		DataBlockSize:         512,
+		HashBlockSize:         512,
+		HashType:              1,
+		UseSuperblock:         true,
+		Salt:                  "0000000000000000000000000000000000000000000000000000000000000000",
+		RootHashSignaturePath: "",
 	}
 }
 
@@ -154,7 +159,7 @@ type StatusInfo struct {
 	InUse bool
 	// Type of the device (e.g., "VERITY")
 	Type string
-	// Status of verification (e.g., "verified")
+	// Status of verification (e.g., "verified" or "verified (with signature)")
 	Status string
 }
 
@@ -200,9 +205,9 @@ func ParseStatusOutput(output string) (*StatusInfo, error) {
 	return info, scanner.Err()
 }
 
-// IsVerified checks if the dm-verity device status is "verified"
+// IsVerified checks if the dm-verity device status is "verified" or "verified (with signature)"
 func (s *StatusInfo) IsVerified() bool {
-	return s.Status == "verified"
+	return s.Status == "verified" || s.Status == "verified (with signature)"
 }
 
 func (s *StatusInfo) IsInUse() bool {

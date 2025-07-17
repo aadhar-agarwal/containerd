@@ -436,6 +436,37 @@ func IDMap(ctx context.Context) (map[string]string, error) {
 	return m, nil
 }
 
+// KeyFromID returns the key for a given snapshot ID.
+func KeyFromID(ctx context.Context, id string) (string, error) {
+	var key string = ""
+
+	err := withBucket(ctx, func(ctx context.Context, bkt, _ *bolt.Bucket) error {
+		return bkt.ForEach(func(k, v []byte) error {
+			// Skip non-buckets
+			if v != nil {
+				return nil
+			}
+
+			// Check if the ID matches
+			if strconv.FormatUint(readID(bkt.Bucket(k)), 10) == id {
+				key = string(k)
+				return nil // Stop iteration
+			}
+			return nil
+		})
+	})
+
+	if err != nil {
+		return "", err
+	}
+
+	if key == "" {
+		return "", fmt.Errorf("key not found for ID %s", id)
+	}
+
+	return key, nil
+}
+
 func withSnapshotBucket(ctx context.Context, key string, fn func(context.Context, *bolt.Bucket, *bolt.Bucket) error) error {
 	tx, ok := ctx.Value(transactionKey{}).(*bolt.Tx)
 	if !ok {
