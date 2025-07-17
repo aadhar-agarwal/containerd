@@ -110,7 +110,7 @@ type LayerInfo struct {
 // readSignatureManifests reads all signature manifest files from the signature manifests directory
 // and builds a map of layer digest to layer info
 func readSignatureManifests(root string) (map[string]LayerInfo, error) {
-	signatureManifests := make(map[string]LayerInfo)
+	digestToLayerInfoMap := make(map[string]LayerInfo)
 
 	// Get signature manifests directory path relative to the provided root
 	signatureManifestDirPath := filepath.Join(root, SignatureManifestsDir)
@@ -118,9 +118,9 @@ func readSignatureManifests(root string) (map[string]LayerInfo, error) {
 	// Check if the signature manifests directory exists
 	if _, err := os.Stat(signatureManifestDirPath); err != nil {
 		if os.IsNotExist(err) {
-			// Directory doesn't exist, return empty signature manifests map
+			// Directory doesn't exist, return empty digest to layer info map
 			log.L.Debugf("signature manifests directory %s does not exist, skipping signature manifest loading", signatureManifestDirPath)
-			return signatureManifests, nil
+			return digestToLayerInfoMap, nil
 		}
 		return nil, fmt.Errorf("failed to access signature manifests directory: %w", err)
 	}
@@ -157,7 +157,7 @@ func readSignatureManifests(root string) (map[string]LayerInfo, error) {
 		// Extract layer information
 		for _, imageInfo := range imageInfoList {
 			for _, layerInfo := range imageInfo.Layers {
-				signatureManifests[layerInfo.Digest] = layerInfo
+				digestToLayerInfoMap[layerInfo.Digest] = layerInfo
 				// Log the digest, root hash and signature
 				log.L.Debugf("loaded signature manifest for layer %s: root hash %s, signature %s\n",
 					layerInfo.Digest, layerInfo.RootHash, layerInfo.Signature)
@@ -165,7 +165,7 @@ func readSignatureManifests(root string) (map[string]LayerInfo, error) {
 		}
 	}
 
-	return signatureManifests, nil
+	return digestToLayerInfoMap, nil
 }
 
 // prepareSignatureFile writes the signature bytes to a file that can be used with veritysetup
@@ -206,12 +206,12 @@ func (s *snapshotter) prepareSignatureFile(hash, signatureBase64 string) (string
 }
 
 type snapshotter struct {
-	root               string
-	ms                 *storage.MetaStore
-	ovlOptions         []string
-	enableFsverity     bool
-	enableDmverity     bool
-	signatureManifests map[string]LayerInfo
+	root                 string
+	ms                   *storage.MetaStore
+	ovlOptions           []string
+	enableFsverity       bool
+	enableDmverity       bool
+	digestToLayerInfoMap map[string]LayerInfo
 }
 
 // check if EROFS kernel filesystem is registered or not
@@ -290,21 +290,21 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 	}
 
 	s := &snapshotter{
-		root:               root,
-		ms:                 ms,
-		ovlOptions:         config.ovlOptions,
-		enableFsverity:     config.enableFsverity,
-		enableDmverity:     config.enableDmverity,
-		signatureManifests: make(map[string]LayerInfo),
+		root:                 root,
+		ms:                   ms,
+		ovlOptions:           config.ovlOptions,
+		enableFsverity:       config.enableFsverity,
+		enableDmverity:       config.enableDmverity,
+		digestToLayerInfoMap: make(map[string]LayerInfo),
 	}
 
-	// Load signature manifests if available
-	signatureManifests, err := readSignatureManifests(root)
+	// get signature manifests if available
+	digestToLayerInfoMap, err := readSignatureManifests(root)
 	if err != nil {
 		log.L.WithError(err).Warn("failed to read signature manifests, continuing without signature verification")
-	} else if len(signatureManifests) > 0 {
-		s.signatureManifests = signatureManifests
-		log.L.Debugf("initialized with %d signature manifests", len(signatureManifests))
+	} else if len(digestToLayerInfoMap) > 0 {
+		s.digestToLayerInfoMap = digestToLayerInfoMap
+		log.L.Debugf("initialized with %d signature manifests", len(digestToLayerInfoMap))
 	} else {
 		log.L.Debug("no signature manifests found, continuing without signature verification")
 	}
@@ -1059,13 +1059,13 @@ func getLayerDigestFromLabels(labels map[string]string) (string, error) {
 // findMatchingSignature looks for a matching signature for the layer digest and verifies the root hash
 // Returns the signature if found and verified, or empty string if no signature was found
 // Returns an error ONLY if the root hashes don't match
-func findMatchingSignature(signatureManifests map[string]LayerInfo, layerDigest string, calculatedRootHash string) (string, error) {
-	if len(signatureManifests) == 0 {
+func findMatchingSignature(digestToLayerInfoMap map[string]LayerInfo, layerDigest string, calculatedRootHash string) (string, error) {
+	if len(digestToLayerInfoMap) == 0 {
 		return "", nil // No signature manifests available
 	}
 
-	// Check if the layer digest exists in our signature manifests map
-	layerInfo, ok := signatureManifests[layerDigest]
+	// Check if the layer digest exists in our digest to layer info map
+	layerInfo, ok := digestToLayerInfoMap[layerDigest]
 	if !ok {
 		log.L.Debugf("no signature found for layer digest: %s", layerDigest)
 		return "", nil
@@ -1102,7 +1102,7 @@ func updateSnapshotLabelsWithSignature(ctx context.Context, info snapshots.Info,
 // a signature file for dm-verity verification.
 // Returns the path to the prepared signature file, or empty string if no signature is found.
 func (s *snapshotter) prepareSnapshotSignature(ctx context.Context, id string, rootHash string) (string, error) {
-	if len(s.signatureManifests) == 0 {
+	if len(s.digestToLayerInfoMap) == 0 {
 		return "", nil // No signature manifests available
 	}
 
@@ -1158,7 +1158,7 @@ func (s *snapshotter) findSignatureAndUpdateLabels(ctx context.Context, info *dm
 	log.L.Debugf("found target layer digest in labels: %s", layerDigest)
 
 	// Try to find a matching signature and verify its root hash
-	signature, err := findMatchingSignature(s.signatureManifests, layerDigest, info.RootHash)
+	signature, err := findMatchingSignature(s.digestToLayerInfoMap, layerDigest, info.RootHash)
 	if err != nil {
 		return fmt.Errorf("failed to verify signature for layer %s: %w", layerDigest, err)
 	}
