@@ -99,7 +99,15 @@ import (
 
 // PullImage pulls an image with authentication config.
 func (c *GRPCCRIImageService) PullImage(ctx context.Context, r *runtime.PullImageRequest) (_ *runtime.PullImageResponse, err error) {
+	imageRef := r.GetImage().GetImage()
+	snapshotter, err := c.snapshotterFromPodSandboxConfig(ctx, imageRef, r.SandboxConfig, r.GetImage().GetRuntimeHandler())
+	if err != nil {
+		return nil, err
+	}
+	return c.pullImage(ctx, r, snapshotter)
+}
 
+func (c *GRPCCRIImageService) pullImage(ctx context.Context, r *runtime.PullImageRequest, snapshotter string) (_ *runtime.PullImageResponse, err error) {
 	imageRef := r.GetImage().GetImage()
 
 	credentials := func(host string) (string, string, error) {
@@ -113,14 +121,14 @@ func (c *GRPCCRIImageService) PullImage(ctx context.Context, r *runtime.PullImag
 		return ParseAuth(hostauth, host)
 	}
 
-	ref, err := c.CRIImageService.PullImage(ctx, imageRef, credentials, r.SandboxConfig, r.GetImage().GetRuntimeHandler())
+	ref, err := c.CRIImageService.PullImage(ctx, imageRef, credentials, r.SandboxConfig, r.GetImage().GetRuntimeHandler(), snapshotter)
 	if err != nil {
 		return nil, err
 	}
 	return &runtime.PullImageResponse{ImageRef: ref}, nil
 }
 
-func (c *CRIImageService) PullImage(ctx context.Context, name string, credentials func(string) (string, string, error), sandboxConfig *runtime.PodSandboxConfig, runtimeHandler string) (_ string, err error) {
+func (c *CRIImageService) PullImage(ctx context.Context, name string, credentials func(string) (string, string, error), sandboxConfig *runtime.PodSandboxConfig, runtimeHandler string, snapshotter string) (_ string, err error) {
 	span := tracing.SpanFromContext(ctx)
 	defer func() {
 		// TODO: add domain label for imagePulls metrics, and we may need to provide a mechanism
@@ -163,11 +171,6 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 	imagePullProgressTimeout, err := time.ParseDuration(c.config.ImagePullProgressTimeout)
 	if err != nil {
 		return "", fmt.Errorf("failed to parse image_pull_progress_timeout %q: %w", c.config.ImagePullProgressTimeout, err)
-	}
-
-	snapshotter, err := c.snapshotterFromPodSandboxConfig(ctx, ref, sandboxConfig)
-	if err != nil {
-		return "", err
 	}
 
 	span.SetAttributes(
@@ -828,17 +831,19 @@ func (rt *pullRequestReporterRoundTripper) RoundTrip(req *http.Request) (*http.R
 // Once we know the runtime, try to override default snapshotter if it is set for this runtime.
 // See https://github.com/containerd/containerd/issues/6657
 func (c *CRIImageService) snapshotterFromPodSandboxConfig(ctx context.Context, imageRef string,
-	s *runtime.PodSandboxConfig) (string, error) {
+	s *runtime.PodSandboxConfig, runtimeHandler string) (string, error) {
 	snapshotter := c.config.Snapshotter
-	if s == nil || s.Annotations == nil {
-		return snapshotter, nil
-	}
 
-	// TODO(kiashok): honor the new CRI runtime handler field added to v0.29.0
-	// for image pull per runtime class support.
-	runtimeHandler, ok := s.Annotations[annotations.RuntimeHandler]
-	if !ok {
-		return snapshotter, nil
+	if runtimeHandler == "" {
+		if s == nil || s.Annotations == nil {
+			return snapshotter, nil
+		} else {
+			ok := false
+			runtimeHandler, ok = s.Annotations[annotations.RuntimeHandler]
+			if !ok {
+				return snapshotter, nil
+			}
+		}
 	}
 
 	// TODO: Ensure error is returned if runtime not found?
