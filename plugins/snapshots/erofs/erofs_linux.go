@@ -314,14 +314,14 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 
 // Close closes the snapshotter
 func (s *snapshotter) Close() error {
-	// If dmverity is enabled, try to close all devices
+	// If dmverity is enabled, try to gracefully close devices that are not in use
 	if s.enableDmverity {
 		// Get a list of all snapshots
 		err := s.ms.WithTransaction(context.Background(), false, func(ctx context.Context) error {
 			return storage.WalkInfo(ctx, func(ctx context.Context, info snapshots.Info) error {
 				if info.Kind == snapshots.KindCommitted {
-					// Close the device if it exists
-					if err := s.closeDmverityDevice(info.Name); err != nil {
+					// Check if device exists and is not in use before closing
+					if err := s.gracefulCloseDmverityDevice(info.Name); err != nil {
 						log.L.WithError(err).Warnf("failed to close dmverity device for %v", info.Name)
 					}
 				}
@@ -399,7 +399,7 @@ func (s *snapshotter) runDmverity(ctx context.Context, id string) (string, error
 	devicePath := fmt.Sprintf("/dev/mapper/%s", dmName)
 	if _, err := os.Stat(devicePath); err == nil {
 		status, err := dmverity.Status(dmName)
-		log.L.Debugf("dmverity device status: ", status)
+		log.L.Debugf("dmverity device status: %+v", status)
 		if err != nil {
 			return "", fmt.Errorf("failed to get dmverity device status: %w", err)
 		}
@@ -1036,6 +1036,46 @@ func (s *snapshotter) closeDmverityDevice(id string) error {
 	if _, err := os.Stat(devicePath); err == nil {
 		_, err = dmverity.Close(dmName)
 		return err
+	}
+	return nil
+}
+
+// gracefulCloseDmverityDevice closes the dmverity device only if it's not currently in use
+// This prevents disrupting running containers during snapshotter shutdown
+func (s *snapshotter) gracefulCloseDmverityDevice(id string) error {
+	if !s.enableDmverity || !s.isLayerWithDmverity(id) {
+		return nil
+	}
+
+	dmName := fmt.Sprintf("containerd-erofs-%s", id)
+	devicePath := fmt.Sprintf("/dev/mapper/%s", dmName)
+
+	if _, err := os.Stat(devicePath); err == nil {
+		// Check if the device is currently in use before attempting to close
+		status, err := dmverity.Status(dmName)
+		if err != nil {
+			log.L.WithError(err).Debugf("failed to get dmverity device status for %s", dmName)
+			return err
+		}
+
+		// Only close if the device is not in use
+		if !status.IsInUse() {
+			// First try to unmount any mounts that might be using this device
+			upperPath := s.upperPath(id)
+			if err := mount.UnmountAll(upperPath, 0); err != nil {
+				log.L.WithError(err).Debugf("failed to unmount %s, device may still be in use", upperPath)
+				// Don't return error here - device might be used elsewhere
+			}
+
+			// Now try to close the device
+			_, err = dmverity.Close(dmName)
+			if err != nil {
+				log.L.WithError(err).Debugf("failed to close dmverity device %s, may still be in use", dmName)
+			}
+			return err
+		} else {
+			log.L.Debugf("dmverity device %s is in use, skipping close during graceful shutdown", dmName)
+		}
 	}
 	return nil
 }
