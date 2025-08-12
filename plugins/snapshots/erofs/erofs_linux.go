@@ -399,7 +399,7 @@ func (s *snapshotter) runDmverity(ctx context.Context, id string) (string, error
 	devicePath := fmt.Sprintf("/dev/mapper/%s", dmName)
 	if _, err := os.Stat(devicePath); err == nil {
 		status, err := dmverity.Status(dmName)
-		log.L.Debugf("dmverity device status: ", status)
+		log.L.Debugf("dmverity device status: %v", status)
 		if err != nil {
 			return "", fmt.Errorf("failed to get dmverity device status: %w", err)
 		}
