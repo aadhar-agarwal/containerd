@@ -467,7 +467,7 @@ func (s *snapshotter) lowerPath(id string) (mount.Mount, string, error) {
 	return mount.Mount{
 		Source:  layerBlob,
 		Type:    "erofs",
-		Options: []string{"ro"},
+		Options: []string{"ro", "context=system_u:object_r:container_file_t:s0"},
 	}, s.upperPath(id), nil
 }
 
