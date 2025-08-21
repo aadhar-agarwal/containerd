@@ -40,6 +40,7 @@ import (
 	"github.com/containerd/continuity/fs"
 	"github.com/containerd/log"
 	"github.com/containerd/plugin"
+	"github.com/opencontainers/selinux/go-selinux"
 	"golang.org/x/sys/unix"
 )
 
@@ -234,6 +235,30 @@ func isErofs(dir string) bool {
 		return false
 	}
 	return uint32(st.Type) == erofsSuperMagic
+}
+
+// getContainerFileSELinuxLabel returns the Container file SELinux label without MCS categories
+func getContainerFileSELinuxLabel() string {
+	processLabel, fileLabel := selinux.ContainerLabels()
+	if fileLabel == "" {
+		log.L.Debugf("SELinux not enabled or no file label available")
+		return ""
+	}
+
+	// Extract the SELinux file label without MCS categories
+	// SELinux labels have format: user:role:type:sensitivity[:categories]
+	// For example, "system_u:object_r:container_file_t:s0:c257,c746" -> "system_u:object_r:container_file_t:s0"
+	parts := strings.Split(fileLabel, ":")
+	if len(parts) < 4 {
+		log.L.Debugf("Invalid SELinux label format: %s", fileLabel)
+		return ""
+	}
+
+	selinux.ReleaseLabel(processLabel)
+	selinux.ReleaseLabel(fileLabel)
+
+	// Keep user:role:type:sensitivity (first 4 parts), discard MCS categories
+	return strings.Join(parts[:4], ":")
 }
 
 // NewSnapshotter returns a Snapshotter which uses EROFS+OverlayFS. The layers
@@ -464,10 +489,21 @@ func (s *snapshotter) lowerPath(id string) (mount.Mount, string, error) {
 		return mount.Mount{}, "", fmt.Errorf("failed to find valid erofs layer blob: %w", err)
 	}
 
+	// Get the file label without MCS categories
+	baseFileLabel := getContainerFileSELinuxLabel()
+	log.L.Debugf("Container file SELinux label for EROFS layer %s: %s", id, baseFileLabel)
+
+	var options []string
+	if baseFileLabel != "" {
+		options = []string{"ro", fmt.Sprintf("context=%s", baseFileLabel)}
+	} else {
+		options = []string{"ro"}
+	}
+
 	return mount.Mount{
 		Source:  layerBlob,
 		Type:    "erofs",
-		Options: []string{"ro", "context=system_u:object_r:container_file_t:s0"},
+		Options: options,
 	}, s.upperPath(id), nil
 }
 
