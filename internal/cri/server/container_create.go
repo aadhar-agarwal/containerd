@@ -206,6 +206,10 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 		return nil, fmt.Errorf("failed to generate container %q spec: %w", id, err)
 	}
 
+	// Log SELinux labels after buildContainerSpec
+	log.G(ctx).Infof("Container %q SELinux labels after buildContainerSpec - Process: %q, Mount: %q",
+		id, spec.Process.SelinuxLabel, spec.Linux.MountLabel)
+
 	meta.ProcessLabel = spec.Process.SelinuxLabel
 
 	// handle any KVM based runtime
@@ -218,6 +222,10 @@ func (c *criService) CreateContainer(ctx context.Context, r *runtime.CreateConta
 		// the unused MCS label can be release later
 		spec.Process.SelinuxLabel = ""
 	}
+
+	// Log final SELinux labels that runc will receive
+	log.G(ctx).Infof("Container %q final SELinux labels for runc - Process: %q, Mount: %q",
+		id, spec.Process.SelinuxLabel, spec.Linux.MountLabel)
 	defer func() {
 		if retErr != nil {
 			selinux.ReleaseLabel(spec.Process.SelinuxLabel)
@@ -440,12 +448,24 @@ func (c *criService) runtimeSpec(id string, platform imagespec.Platform, baseSpe
 			return nil, fmt.Errorf("failed to apply OCI options: %w", err)
 		}
 
+		// Log final OCI spec SELinux labels (base spec path)
+		if spec.Process != nil && spec.Linux != nil {
+			log.G(ctx).Infof("Final OCI spec for container %q (base spec) - Process SELinux label: %q, Mount label: %q",
+				id, spec.Process.SelinuxLabel, spec.Linux.MountLabel)
+		}
+
 		return &spec, nil
 	}
 
 	spec, err := oci.GenerateSpecWithPlatform(ctx, nil, platforms.Format(platform), container, opts...)
 	if err != nil {
 		return nil, fmt.Errorf("failed to generate spec: %w", err)
+	}
+
+	// Log final OCI spec SELinux labels
+	if spec.Process != nil && spec.Linux != nil {
+		log.G(ctx).Infof("Final OCI spec for container %q - Process SELinux label: %q, Mount label: %q",
+			id, spec.Process.SelinuxLabel, spec.Linux.MountLabel)
 	}
 
 	return spec, nil
@@ -701,6 +721,7 @@ func (c *criService) buildLinuxSpec(
 	}
 
 	processLabel, mountLabel, err := label.InitLabels(labelOptions)
+	log.L.Info("Initialized SELinux labels", "processLabel", processLabel, "mountLabel", mountLabel)
 	if err != nil {
 		return nil, fmt.Errorf("failed to init selinux options %+v: %w", securityContext.GetSelinuxOptions(), err)
 	}
