@@ -934,11 +934,6 @@ func (s *snapshotter) Remove(ctx context.Context, key string) (err error) {
 		}
 		// The layer blob is only persisted for committed snapshots.
 		if k == snapshots.KindCommitted {
-			log.L.Debugf("closing dmverity device for %v", id)
-			if err := s.closeDmverityDevice(id); err != nil {
-				log.G(ctx).WithError(err).Warnf("failed to close dmverity device for %v", id)
-			}
-
 			// Clear IMMUTABLE_FL before removal, since this flag avoids it.
 			err = setImmutable(s.layerBlobPath(id), false)
 			if err != nil {
