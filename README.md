@@ -156,6 +156,7 @@ A Kubernetes incubator project, [cri-tools](https://github.com/kubernetes-sigs/c
 * [Debugging Pods, Containers, and Images with `crictl`](./docs/cri/crictl.md)
 * [Configuring `cri` Plugins](./docs/cri/config.md)
 * [Configuring containerd](https://github.com/containerd/containerd/blob/main/docs/man/containerd-config.8.md)
+* [**🔍 Verifying OCI Referrers Pull**](REFERRERS_VERIFICATION.md) - How to verify referrers (signatures, attestations, SBOMs) are being discovered and pulled
 
 ### Communication
 

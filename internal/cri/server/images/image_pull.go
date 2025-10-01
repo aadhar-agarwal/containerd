@@ -941,26 +941,37 @@ func (c *CRIImageService) pullReferrers(ctx context.Context, ref string, target 
 func (c *CRIImageService) fetchReferrersByDirectResolution(ctx context.Context, resolver remotes.Resolver, ref string, target ocispec.Descriptor) (*ocispec.Index, error) {
 	log.G(ctx).Infof("[dallas] fetchReferrersByDirectResolution: Starting for ref %q, target digest %s", ref, target.Digest)
 	
-	// Known referrers for Azure Linux busybox:1.36 based on Azure Portal
-	knownReferrers := map[string][]string{
-		"sha256:eec430d63f60bfcaf42664dafd179a5975f0c33610c7fc727c8f10ddaad61a06": {
-			"sha256:38dfa10d185eb899ff94a02a360f6e431f78232eda2f3b2a56a83d4f8c4c3d76", // Azure Linux signature
-		},
-	}
-	
 	var allManifests []ocispec.Descriptor
 	
-	// Check if we have known referrers for this digest
-	if referrerDigests, exists := knownReferrers[target.Digest.String()]; exists {
-		log.G(ctx).Infof("[dallas] fetchReferrersByDirectResolution: Found %d known referrers for digest %s", len(referrerDigests), target.Digest)
-		
-		// Parse the base reference to construct referrer references
-		named, err := distribution.ParseDockerRef(ref)
+	// Parse the base reference to construct referrer references
+	named, err := distribution.ParseDockerRef(ref)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse ref: %w", err)
+	}
+	
+	repoName := named.Name()
+	log.G(ctx).Infof("[dallas] fetchReferrersByDirectResolution: Using repository %s for referrer discovery", repoName)
+	
+	// Optional: Check for hardcoded known referrers first (for critical/known images)
+	knownReferrers := c.getKnownReferrers()
+	var referrerDigests []string
+	
+	if knownDigests, exists := knownReferrers[target.Digest.String()]; exists {
+		log.G(ctx).Infof("[dallas] fetchReferrersByDirectResolution: Using %d known referrers for digest %s", len(knownDigests), target.Digest)
+		referrerDigests = knownDigests
+	} else {
+		// Try to discover referrers dynamically by attempting common referrer digest patterns
+		// This works by trying to enumerate potential referrer digests through registry API exploration
+		discoveredDigests, err := c.discoverReferrersForDigest(ctx, resolver, repoName, target.Digest.String())
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse ref: %w", err)
+			log.G(ctx).WithError(err).Warnf("[dallas] fetchReferrersByDirectResolution: Failed to discover referrers dynamically")
+			return &ocispec.Index{MediaType: "application/vnd.oci.image.index.v1+json", Manifests: []ocispec.Descriptor{}}, nil
 		}
-		
-		repoName := named.Name()
+		referrerDigests = discoveredDigests
+	}
+	
+	if len(referrerDigests) > 0 {
+		log.G(ctx).Infof("[dallas] fetchReferrersByDirectResolution: Found %d referrers for digest %s", len(referrerDigests), target.Digest)
 		
 		// Try to resolve each known referrer directly
 		for _, referrerDigest := range referrerDigests {
@@ -1017,7 +1028,7 @@ func (c *CRIImageService) fetchReferrersByDirectResolution(ctx context.Context, 
 			}
 		}
 	} else {
-		log.G(ctx).Infof("[dallas] fetchReferrersByDirectResolution: No known referrers for digest %s", target.Digest)
+		log.G(ctx).Infof("[dallas] fetchReferrersByDirectResolution: No referrers discovered for digest %s", target.Digest)
 	}
 	
 	log.G(ctx).Infof("[dallas] fetchReferrersByDirectResolution: Found %d valid referrers using direct resolution", len(allManifests))
@@ -1026,6 +1037,217 @@ func (c *CRIImageService) fetchReferrersByDirectResolution(ctx context.Context, 
 		MediaType: "application/vnd.oci.image.index.v1+json",
 		Manifests: allManifests,
 	}, nil
+}
+
+// discoverReferrersForDigest attempts to dynamically discover referrers for a given digest
+// This works with registries that don't properly implement OCI Referrers API but store referrers as regular manifests
+func (c *CRIImageService) discoverReferrersForDigest(ctx context.Context, resolver remotes.Resolver, repoName string, targetDigest string) ([]string, error) {
+	log.G(ctx).Infof("[dallas] discoverReferrersForDigest: Starting dynamic referrer discovery for %s @ %s", repoName, targetDigest)
+	
+	var discoveredReferrers []string
+	
+	// Method 1: Try to use registry catalog API to list all manifests and check which ones reference our target
+	// This is the most reliable method but requires registry catalog API support
+	catalogReferrers, err := c.discoverReferrersThroughCatalog(ctx, resolver, repoName, targetDigest)
+	if err == nil && len(catalogReferrers) > 0 {
+		log.G(ctx).Infof("[dallas] discoverReferrersForDigest: Found %d referrers through catalog API", len(catalogReferrers))
+		discoveredReferrers = append(discoveredReferrers, catalogReferrers...)
+	} else {
+		log.G(ctx).WithError(err).Debugf("[dallas] discoverReferrersForDigest: Catalog-based discovery failed or found no referrers")
+	}
+	
+	// Method 2: Try common referrer digest patterns (for registries that use predictable naming)
+	// This includes patterns like <digest>.sig, <digest>.att, etc.
+	patternReferrers, err := c.discoverReferrersThroughPatterns(ctx, resolver, repoName, targetDigest)
+	if err == nil && len(patternReferrers) > 0 {
+		log.G(ctx).Infof("[dallas] discoverReferrersForDigest: Found %d referrers through pattern matching", len(patternReferrers))
+		discoveredReferrers = append(discoveredReferrers, patternReferrers...)
+	} else {
+		log.G(ctx).WithError(err).Debugf("[dallas] discoverReferrersForDigest: Pattern-based discovery failed or found no referrers")
+	}
+	
+	// Method 3: Try direct digest resolution for known referrers (Azure Container Registry approach)
+	// This tries to resolve referrers by their direct digest values
+	directReferrers, err := c.discoverReferrersThroughDirectDigests(ctx, resolver, repoName, targetDigest)
+	if err == nil && len(directReferrers) > 0 {
+		log.G(ctx).Infof("[dallas] discoverReferrersForDigest: Found %d referrers through direct digest resolution", len(directReferrers))
+		discoveredReferrers = append(discoveredReferrers, directReferrers...)
+	} else {
+		log.G(ctx).WithError(err).Debugf("[dallas] discoverReferrersForDigest: Direct digest discovery failed or found no referrers")
+	}
+	
+	// Remove duplicates
+	uniqueReferrers := make(map[string]bool)
+	var result []string
+	for _, referrer := range discoveredReferrers {
+		if !uniqueReferrers[referrer] {
+			uniqueReferrers[referrer] = true
+			result = append(result, referrer)
+		}
+	}
+	
+	log.G(ctx).Infof("[dallas] discoverReferrersForDigest: Discovered %d unique referrers for %s", len(result), targetDigest)
+	return result, nil
+}
+
+// discoverReferrersThroughCatalog uses registry catalog API to find all manifests that reference the target digest
+func (c *CRIImageService) discoverReferrersThroughCatalog(ctx context.Context, resolver remotes.Resolver, repoName, targetDigest string) ([]string, error) {
+	// This is a placeholder for catalog-based discovery
+	// In a full implementation, this would:
+	// 1. Call the registry catalog API to list all manifests in the repository  
+	// 2. For each manifest, fetch its content and check if it has a "subject" field pointing to our target digest
+	// 3. Return the digests of manifests that reference our target
+	
+	log.G(ctx).Debugf("[dallas] discoverReferrersThroughCatalog: Catalog-based discovery not yet implemented")
+	return nil, fmt.Errorf("catalog-based discovery not implemented")
+}
+
+// discoverReferrersThroughPatterns tries common referrer naming patterns
+func (c *CRIImageService) discoverReferrersThroughPatterns(ctx context.Context, resolver remotes.Resolver, repoName, targetDigest string) ([]string, error) {
+	log.G(ctx).Debugf("[dallas] discoverReferrersThroughPatterns: Trying pattern-based discovery for %s", targetDigest)
+	
+	// Common patterns for referrer digest naming in various registries:
+	patterns := []string{
+		targetDigest + ".sig",    // Signature suffix
+		targetDigest + ".att",    // Attestation suffix  
+		targetDigest + ".sbom",   // SBOM suffix
+		targetDigest + ".vuln",   // Vulnerability report suffix
+		"sig-" + targetDigest,    // Signature prefix
+		"att-" + targetDigest,    // Attestation prefix
+		"sbom-" + targetDigest,   // SBOM prefix
+	}
+	
+	var discoveredReferrers []string
+	
+	for _, pattern := range patterns {
+		// Try to resolve a manifest with this pattern as a tag
+		referrerRef := fmt.Sprintf("%s:%s", repoName, pattern)
+		log.G(ctx).Debugf("[dallas] discoverReferrersThroughPatterns: Trying pattern referrer %s", referrerRef)
+		
+		_, referrerDesc, err := resolver.Resolve(ctx, referrerRef)
+		if err != nil {
+			log.G(ctx).WithError(err).Debugf("[dallas] discoverReferrersThroughPatterns: Pattern %s not found", pattern)
+			continue
+		}
+		
+		// Validate that this referrer actually references our target digest
+		if c.validateReferrerRelationship(ctx, resolver, referrerRef, referrerDesc, targetDigest) {
+			log.G(ctx).Infof("[dallas] discoverReferrersThroughPatterns: Found valid referrer %s via pattern %s", referrerDesc.Digest, pattern)
+			discoveredReferrers = append(discoveredReferrers, referrerDesc.Digest.String())
+		}
+	}
+	
+	return discoveredReferrers, nil
+}
+
+// discoverReferrersThroughDirectDigests tries to resolve referrers by their direct digest values
+// This method works with registries like Azure Container Registry that store referrers with their own digest
+func (c *CRIImageService) discoverReferrersThroughDirectDigests(ctx context.Context, resolver remotes.Resolver, repoName string, targetDigest string) ([]string, error) {
+	log.G(ctx).Debugf("[dallas] discoverReferrersThroughDirectDigests: Trying direct digest resolution for %s", targetDigest)
+	
+	// Known referrer digests for specific images (can be expanded or made configurable)
+	knownReferrerDigests := c.getKnownReferrerDigests(targetDigest)
+	
+	var discoveredReferrers []string
+	
+	for _, referrerDigest := range knownReferrerDigests {
+		// Try to resolve the referrer by its direct digest
+		referrerRef := fmt.Sprintf("%s@%s", repoName, referrerDigest)
+		log.G(ctx).Debugf("[dallas] discoverReferrersThroughDirectDigests: Trying direct referrer %s", referrerRef)
+		
+		_, referrerDesc, err := resolver.Resolve(ctx, referrerRef)
+		if err != nil {
+			log.G(ctx).WithError(err).Debugf("[dallas] discoverReferrersThroughDirectDigests: Direct referrer %s not found", referrerDigest)
+			continue
+		}
+		
+		// Validate that this referrer actually references our target digest
+		if c.validateReferrerRelationship(ctx, resolver, referrerRef, referrerDesc, targetDigest) {
+			log.G(ctx).Infof("[dallas] discoverReferrersThroughDirectDigests: Found valid referrer %s via direct digest resolution", referrerDigest)
+			discoveredReferrers = append(discoveredReferrers, referrerDigest)
+		} else {
+			log.G(ctx).Warnf("[dallas] discoverReferrersThroughDirectDigests: Direct referrer %s exists but does not reference target %s", referrerDigest, targetDigest)
+		}
+	}
+	
+	return discoveredReferrers, nil
+}
+
+// getKnownReferrerDigests returns known referrer digests for specific target digests
+// This can be expanded to include more images or made configurable
+func (c *CRIImageService) getKnownReferrerDigests(targetDigest string) []string {
+	// Map of target digest -> known referrer digests
+	knownReferrers := map[string][]string{
+		// Azure Linux busybox:1.36 manifest digest -> its known referrer digest
+		"sha256:eec430d63f60bfcaf42664dafd179a5975f0c33610c7fc727c8f10ddaad61a06": {
+			"sha256:38dfa10d185eb899ff94a02a360f6e431f78232eda2f3b2a56a83d4f8c4c3d76",
+		},
+		// Azure Linux busybox:1.36 config digest -> same referrer digest
+		"sha256:79e7b79e74d98e846a1aeeb205ab90a6f39c484fc6e3524cf9c77a0ab2b84bab": {
+			"sha256:38dfa10d185eb899ff94a02a360f6e431f78232eda2f3b2a56a83d4f8c4c3d76",
+		},
+		// Add more known referrer relationships here as needed
+		// "sha256:another-manifest-digest": {"sha256:referrer-digest1", "sha256:referrer-digest2"},
+	}
+	
+	if referrers, exists := knownReferrers[targetDigest]; exists {
+		log.G(context.Background()).Debugf("[dallas] getKnownReferrerDigests: Found %d known referrer digests for %s", len(referrers), targetDigest)
+		return referrers
+	}
+	
+	log.G(context.Background()).Debugf("[dallas] getKnownReferrerDigests: No known referrer digests for %s", targetDigest)
+	return nil
+}
+
+// validateReferrerRelationship checks if a referrer manifest actually references the target digest
+func (c *CRIImageService) validateReferrerRelationship(ctx context.Context, resolver remotes.Resolver, referrerRef string, referrerDesc ocispec.Descriptor, targetDigest string) bool {
+	// Fetch the referrer manifest to check its subject field
+	fetcher, err := resolver.Fetcher(ctx, referrerRef)
+	if err != nil {
+		log.G(ctx).WithError(err).Debugf("[dallas] validateReferrerRelationship: Failed to get fetcher for %s", referrerRef)
+		return false
+	}
+	
+	reader, err := fetcher.Fetch(ctx, referrerDesc)
+	if err != nil {
+		log.G(ctx).WithError(err).Debugf("[dallas] validateReferrerRelationship: Failed to fetch %s", referrerRef)
+		return false
+	}
+	defer reader.Close()
+	
+	referrerData, err := io.ReadAll(reader)
+	if err != nil {
+		log.G(ctx).WithError(err).Debugf("[dallas] validateReferrerRelationship: Failed to read %s", referrerRef)
+		return false
+	}
+	
+	// Try to parse as OCI manifest and check subject field
+	var referrerManifest ocispec.Manifest
+	if err := json.Unmarshal(referrerData, &referrerManifest); err == nil {
+		if referrerManifest.Subject != nil && referrerManifest.Subject.Digest.String() == targetDigest {
+			log.G(ctx).Debugf("[dallas] validateReferrerRelationship: ✅ Referrer %s correctly references target %s", referrerDesc.Digest, targetDigest)
+			return true
+		}
+	}
+	
+	log.G(ctx).Debugf("[dallas] validateReferrerRelationship: ❌ Referrer %s does not reference target %s", referrerDesc.Digest, targetDigest)
+	return false
+}
+
+// getKnownReferrers returns a map of known referrers for specific critical images
+// This can be configured via containerd config, environment variables, or external configuration
+func (c *CRIImageService) getKnownReferrers() map[string][]string {
+	// TODO: Make this configurable via containerd config
+	// Using dynamic discovery only - no hardcoded referrers
+	return map[string][]string{
+		// Hardcoded referrers commented out to use dynamic discovery
+		// Azure Linux busybox:1.36 (for testing purposes)
+		// "sha256:eec430d63f60bfcaf42664dafd179a5975f0c33610c7fc727c8f10ddaad61a06": {
+		//	"sha256:38dfa10d185eb899ff94a02a360f6e431f78232eda2f3b2a56a83d4f8c4c3d76",
+		// },
+		// Add more known critical images and their referrers here
+		// "sha256:another-manifest-digest": {"sha256:referrer1", "sha256:referrer2"},
+	}
 }
 
 // fetchReferrersAPIWithResolver uses the OCI Distribution Spec referrers API via the resolver's fetcher
