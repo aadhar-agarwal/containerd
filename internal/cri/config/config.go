@@ -322,6 +322,10 @@ type ImageConfig struct {
 
 	// StatsCollectPeriod is the period (in seconds) of snapshots stats collection.
 	StatsCollectPeriod int `toml:"stats_collect_period" json:"statsCollectPeriod"`
+
+	// EnableReferrersPull enables pulling of OCI referrers (signatures, attestations, etc.)
+	// when pulling container images. This follows the OCI Distribution Spec referrers API.
+	EnableReferrersPull bool `toml:"enable_referrers_pull" json:"enableReferrersPull"`
 }
 
 // RuntimeConfig contains toml config related to CRI plugin,

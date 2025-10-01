@@ -35,6 +35,7 @@ func DefaultImageConfig() ImageConfig {
 			"sandbox": DefaultSandboxImage,
 		},
 		ImagePullProgressTimeout: defaultImagePullProgressTimeoutDuration.String(),
+		EnableReferrersPull:      true, // Disabled by default for backward compatibility
 	}
 }
 

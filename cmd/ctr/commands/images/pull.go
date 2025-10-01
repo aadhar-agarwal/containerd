@@ -84,6 +84,10 @@ command. As part of this process, we do the following:
 			Name:  "local",
 			Usage: "Fetch content from local client rather than using transfer service",
 		},
+		&cli.BoolFlag{
+			Name:  "referrers",
+			Usage: "Pull referrers (signatures, attestations) for the image",
+		},
 	),
 	Action: func(cliContext *cli.Context) error {
 		var (
@@ -159,7 +163,18 @@ command. As part of this process, we do the following:
 			pf, done := ProgressHandler(ctx, os.Stdout)
 			defer done()
 
-			return client.Transfer(ctx, reg, is, transfer.WithProgress(pf))
+			err = client.Transfer(ctx, reg, is, transfer.WithProgress(pf))
+			if err != nil {
+				return err
+			}
+
+		// Pull referrers if requested
+		if cliContext.Bool("referrers") {
+			fmt.Printf("Referrers pulling requested for: %s\n", ref)
+			// TODO: Implement referrers pulling for transfer API
+		}
+
+		return nil
 		}
 
 		ctx, done, err := client.WithLease(ctx)
@@ -217,6 +232,13 @@ command. As part of this process, we do the following:
 			}
 		}
 		fmt.Printf("done: %s\t\n", time.Since(start))
+
+		// Pull referrers if requested
+		if cliContext.Bool("referrers") {
+			fmt.Printf("Referrers pulling requested for: %s (local mode)\n", ref)
+			// TODO: Implement referrers pulling for local mode
+		}
+
 		return nil
 	},
 }

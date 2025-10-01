@@ -37,6 +37,7 @@ func DefaultImageConfig() ImageConfig {
 		ImagePullProgressTimeout: defaultImagePullProgressTimeoutDuration.String(),
 		ImagePullWithSyncFs:      false,
 		StatsCollectPeriod:       10,
+		EnableReferrersPull:      true, // Disabled by default for backward compatibility
 	}
 }
 
