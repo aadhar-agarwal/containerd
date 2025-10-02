@@ -55,6 +55,10 @@ const (
 	// manifests
 	HostCapabilityPush
 
+	// HostCapabilityReferrers represents the capability to fetch referrers
+	// for a given manifest digest using the OCI Distribution Spec referrers API
+	HostCapabilityReferrers
+
 	// Reserved for future capabilities (i.e. search, catalog, remove)
 )
 

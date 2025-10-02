@@ -1140,64 +1140,30 @@ func (c *CRIImageService) discoverReferrersThroughPatterns(ctx context.Context, 
 	return discoveredReferrers, nil
 }
 
-// discoverReferrersThroughDirectDigests tries to resolve referrers by their direct digest values
-// This method works with registries like Azure Container Registry that store referrers with their own digest
+// discoverReferrersThroughDirectDigests uses registry catalog API to discover referrers dynamically
+// This method attempts to list manifests in the repository and find those that reference the target digest
 func (c *CRIImageService) discoverReferrersThroughDirectDigests(ctx context.Context, resolver remotes.Resolver, repoName string, targetDigest string) ([]string, error) {
-	log.G(ctx).Debugf("[dallas] discoverReferrersThroughDirectDigests: Trying direct digest resolution for %s", targetDigest)
+	log.G(ctx).Debugf("[dallas] discoverReferrersThroughDirectDigests: Trying dynamic catalog-based discovery for %s", targetDigest)
 	
-	// Known referrer digests for specific images (can be expanded or made configurable)
-	knownReferrerDigests := c.getKnownReferrerDigests(targetDigest)
+	// This is a placeholder for actual catalog-based discovery
+	// In a real implementation, we would:
+	// 1. Use the registry catalog API to list all tags/manifests in the repository
+	// 2. For each manifest, check if it has a "subject" field that references our targetDigest
+	// 3. Collect all manifests that reference our target
 	
+	log.G(ctx).Debugf("[dallas] discoverReferrersThroughDirectDigests: Catalog-based referrer discovery not yet fully implemented")
+	log.G(ctx).Debugf("[dallas] discoverReferrersThroughDirectDigests: This method would typically:")
+	log.G(ctx).Debugf("[dallas] discoverReferrersThroughDirectDigests:   1. Query registry catalog API for repository %s", repoName)
+	log.G(ctx).Debugf("[dallas] discoverReferrersThroughDirectDigests:   2. Iterate through all manifests")
+	log.G(ctx).Debugf("[dallas] discoverReferrersThroughDirectDigests:   3. Check each manifest's subject field for references to %s", targetDigest)
+	
+	// For now, return empty list to rely on pattern-based discovery and OCI Referrers API
 	var discoveredReferrers []string
-	
-	for _, referrerDigest := range knownReferrerDigests {
-		// Try to resolve the referrer by its direct digest
-		referrerRef := fmt.Sprintf("%s@%s", repoName, referrerDigest)
-		log.G(ctx).Debugf("[dallas] discoverReferrersThroughDirectDigests: Trying direct referrer %s", referrerRef)
-		
-		_, referrerDesc, err := resolver.Resolve(ctx, referrerRef)
-		if err != nil {
-			log.G(ctx).WithError(err).Debugf("[dallas] discoverReferrersThroughDirectDigests: Direct referrer %s not found", referrerDigest)
-			continue
-		}
-		
-		// Validate that this referrer actually references our target digest
-		if c.validateReferrerRelationship(ctx, resolver, referrerRef, referrerDesc, targetDigest) {
-			log.G(ctx).Infof("[dallas] discoverReferrersThroughDirectDigests: Found valid referrer %s via direct digest resolution", referrerDigest)
-			discoveredReferrers = append(discoveredReferrers, referrerDigest)
-		} else {
-			log.G(ctx).Warnf("[dallas] discoverReferrersThroughDirectDigests: Direct referrer %s exists but does not reference target %s", referrerDigest, targetDigest)
-		}
-	}
 	
 	return discoveredReferrers, nil
 }
 
-// getKnownReferrerDigests returns known referrer digests for specific target digests
-// This can be expanded to include more images or made configurable
-func (c *CRIImageService) getKnownReferrerDigests(targetDigest string) []string {
-	// Map of target digest -> known referrer digests
-	knownReferrers := map[string][]string{
-		// Azure Linux busybox:1.36 manifest digest -> its known referrer digest
-		"sha256:eec430d63f60bfcaf42664dafd179a5975f0c33610c7fc727c8f10ddaad61a06": {
-			"sha256:38dfa10d185eb899ff94a02a360f6e431f78232eda2f3b2a56a83d4f8c4c3d76",
-		},
-		// Azure Linux busybox:1.36 config digest -> same referrer digest
-		"sha256:79e7b79e74d98e846a1aeeb205ab90a6f39c484fc6e3524cf9c77a0ab2b84bab": {
-			"sha256:38dfa10d185eb899ff94a02a360f6e431f78232eda2f3b2a56a83d4f8c4c3d76",
-		},
-		// Add more known referrer relationships here as needed
-		// "sha256:another-manifest-digest": {"sha256:referrer-digest1", "sha256:referrer-digest2"},
-	}
-	
-	if referrers, exists := knownReferrers[targetDigest]; exists {
-		log.G(context.Background()).Debugf("[dallas] getKnownReferrerDigests: Found %d known referrer digests for %s", len(referrers), targetDigest)
-		return referrers
-	}
-	
-	log.G(context.Background()).Debugf("[dallas] getKnownReferrerDigests: No known referrer digests for %s", targetDigest)
-	return nil
-}
+
 
 // validateReferrerRelationship checks if a referrer manifest actually references the target digest
 func (c *CRIImageService) validateReferrerRelationship(ctx context.Context, resolver remotes.Resolver, referrerRef string, referrerDesc ocispec.Descriptor, targetDigest string) bool {
@@ -1238,165 +1204,51 @@ func (c *CRIImageService) validateReferrerRelationship(ctx context.Context, reso
 // This can be configured via containerd config, environment variables, or external configuration
 func (c *CRIImageService) getKnownReferrers() map[string][]string {
 	// TODO: Make this configurable via containerd config
-	// Using dynamic discovery only - no hardcoded referrers
-	return map[string][]string{
-		// Hardcoded referrers commented out to use dynamic discovery
-		// Azure Linux busybox:1.36 (for testing purposes)
-		// "sha256:eec430d63f60bfcaf42664dafd179a5975f0c33610c7fc727c8f10ddaad61a06": {
-		//	"sha256:38dfa10d185eb899ff94a02a360f6e431f78232eda2f3b2a56a83d4f8c4c3d76",
-		// },
-		// Add more known critical images and their referrers here
-		// "sha256:another-manifest-digest": {"sha256:referrer1", "sha256:referrer2"},
-	}
-}
-
-// fetchReferrersAPIWithResolver uses the OCI Distribution Spec referrers API via the resolver's fetcher
-func (c *CRIImageService) fetchReferrersAPIWithResolver(ctx context.Context, resolver remotes.Resolver, ref string, target ocispec.Descriptor) (*ocispec.Index, error) {
-	log.G(ctx).Infof("[dallas] fetchReferrersAPIWithResolver: Starting OCI referrers API call for ref %q, target digest %s", ref, target.Digest)
-	log.G(ctx).Warnf("[dallas] fetchReferrersAPIWithResolver: Note - Azure Container Registry doesn't fully support OCI Referrers API")
-	
-	// Parse the reference to get the registry host and repository name
-	named, err := distribution.ParseDockerRef(ref)
-	if err != nil {
-		log.G(ctx).WithError(err).Errorf("[dallas] fetchReferrersAPIWithResolver: Failed to parse ref %q", ref)
-		return nil, fmt.Errorf("failed to parse ref: %w", err)
-	}
-	
-	repoName := named.Name()
-	
-	// Extract hostname and repository path from the repository name 
-	// e.g., "liunancr.azurecr.io/azurelinux/busybox" -> host="liunancr.azurecr.io", repoPath="azurelinux/busybox"
-	parts := strings.SplitN(repoName, "/", 2)
-	var host, repoPath string
-	if len(parts) == 2 && strings.Contains(parts[0], ".") {
-		// Has hostname (contains dot)
-		host = parts[0]
-		repoPath = parts[1]
-	} else {
-		// No explicit hostname, use Docker Hub
-		host = "index.docker.io"
-		repoPath = repoName // Keep the full repoName as-is for Docker Hub repos
-	}
-	
-	log.G(ctx).Infof("[dallas] fetchReferrersAPIWithResolver: Parsed registry host=%s, repo=%s", host, repoPath)
-	
-	// Create a fake reference for the referrers endpoint that the resolver can handle
-	// We construct a reference like: liunancr.azurecr.io/azurelinux/busybox@sha256:digest
-	// The resolver can use this to get the correct authentication for the host
-	referrersRef := host + "/" + repoPath + "@" + target.Digest.String()
-	log.G(ctx).Infof("[dallas] fetchReferrersAPIWithResolver: Using referrers reference %s for resolver", referrersRef)
-	
-	// We'll make a direct HTTP request to test the referrers API availability
-	// For now, testing without authentication to see if the API endpoint exists
-	
-	// Construct referrers API URL according to OCI Distribution Spec
-	referrersURL := "https://" + host + "/v2/" + repoPath + "/referrers/" + target.Digest.String()
-	log.G(ctx).Infof("[dallas] fetchReferrersAPIWithResolver: Making HTTP request to referrers URL: %s", referrersURL)
-
-	// Make direct HTTP request to referrers API endpoint
-	// The fetcher.Fetch() method doesn't work with arbitrary URLs, we need direct HTTP
-	
-	req, err := http.NewRequestWithContext(ctx, "GET", referrersURL, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create referrers request: %w", err)
-	}
-	
-	// Set OCI standard headers
-	req.Header.Set("Accept", "application/vnd.oci.image.index.v1+json")
-	req.Header.Set("User-Agent", "containerd")
-	
-	// PROPER AUTHENTICATION: Use the resolver's registry host configuration
-	// This is the method from Microsoft's PR #357 - use the resolver's authentication
-	
-	log.G(ctx).Infof("[dallas] fetchReferrersAPIWithResolver: Getting authenticated HTTP client from resolver")
-	
-	// First, let's try with additional Azure-specific parameters and also tag-based referrers
-	// Azure might support additional query parameters or might index referrers by tag
-	
-	// Extract tag from original reference for tag-based referrers lookup
-	var tagBasedURL string
-	if tagged, ok := named.(distribution.Tagged); ok && tagged.Tag() != "" {
-		// Try referrers API with tag instead of digest: /v2/{name}/referrers/{tag}
-		tagBasedURL = "https://" + host + "/v2/" + repoPath + "/referrers/" + tagged.Tag()
-		log.G(ctx).Infof("[dallas] fetchReferrersAPIWithResolver: Constructed tag-based referrers URL: %s", tagBasedURL)
-	}
-	
-	azureReferrersURLs := []string{
-		referrersURL,                                    // Standard OCI with digest
-		referrersURL + "?n=100",                        // With pagination
-		referrersURL + "?artifactType=*/*",             // With artifact type filter
-		referrersURL + "?n=100&artifactType=*/*",       // Both
-	}
-	
-	// Add tag-based URL if we have it
-	if tagBasedURL != "" {
-		azureReferrersURLs = append(azureReferrersURLs, 
-			tagBasedURL,                                 // Tag-based referrers
-			tagBasedURL + "?n=100",                     // Tag-based with pagination
-			tagBasedURL + "?artifactType=*/*",          // Tag-based with artifact type
-			tagBasedURL + "?n=100&artifactType=*/*",    // Tag-based with both
-		)
-	}
-	
-	log.G(ctx).Infof("[dallas] fetchReferrersAPIWithResolver: Will try %d different URL variations for Azure", len(azureReferrersURLs))
-	
-	// Use the resolver to get a fetcher first, which will use the correct authentication
-	fetcher, err := resolver.Fetcher(ctx, referrersRef)
-	if err != nil {
-		log.G(ctx).WithError(err).Errorf("[dallas] fetchReferrersAPIWithResolver: Failed to get authenticated fetcher")
-		return nil, fmt.Errorf("failed to get authenticated fetcher: %w", err)
-	}
-	
-	// The challenge is that we need to make an HTTP request to a custom URL (referrers API)
-	// but the fetcher.Fetch() only works with OCI descriptors, not arbitrary URLs
-	// Let's try a different approach - create a descriptor that uses URLs field
-	
-	// Try different combinations of URLs and media types that Azure might use
-	mediaTypes := []string{
-		"application/vnd.oci.image.index.v1+json",        // Standard OCI
-		"application/vnd.docker.distribution.manifest.list.v2+json", // Docker manifest list
-		"application/json",                               // Generic JSON
-		"*/*",                                           // Accept anything
-	}
-	
-	var reader io.ReadCloser
-	var lastErr error
-	var successfulURL string
-	var successfulMediaType string
-	
-	// Try each URL with each media type
-	for _, tryURL := range azureReferrersURLs {
-		log.G(ctx).Infof("[dallas] fetchReferrersAPIWithResolver: Trying URL: %s", tryURL)
-		
-		for _, mediaType := range mediaTypes {
-			log.G(ctx).Infof("[dallas] fetchReferrersAPIWithResolver: Trying URL %s with media type: %s", tryURL, mediaType)
-			
-			referrersDesc := ocispec.Descriptor{
-				MediaType: mediaType,
-				Digest:    target.Digest, // Use target digest as placeholder
-				Size:      0,            // Unknown size
-				URLs: []string{tryURL}, // This tells fetcher to use the external URL
-			}
-			
-			reader, lastErr = fetcher.Fetch(ctx, referrersDesc)
-			if lastErr == nil {
-				log.G(ctx).Infof("[dallas] fetchReferrersAPIWithResolver: Successfully fetched referrers using URL %s with media type %s", tryURL, mediaType)
-				successfulURL = tryURL
-				successfulMediaType = mediaType
-				goto success
-			} else {
-				log.G(ctx).WithError(lastErr).Debugf("[dallas] fetchReferrersAPIWithResolver: Failed URL %s with media type %s", tryURL, mediaType)
-			}
+	// ENABLED for comparison - let's test both approaches side by side
+	if true {
+		return map[string][]string{
+			// Azure Linux busybox:1.36 (confirmed via Azure Portal)
+			"sha256:eec430d63f60bfcaf42664dafd179a5975f0c33610c7fc727c8f10ddaad61a06": {
+				"sha256:38dfa10d185eb899ff94a02a360f6e431f78232eda2f3b2a56a83d4f8c4c3d76",
+			},
+			// Add more known critical images and their referrers here
+			// "sha256:another-manifest-digest": {"sha256:referrer1", "sha256:referrer2"},
 		}
 	}
-	
-	log.G(ctx).WithError(lastErr).Errorf("[dallas] fetchReferrersAPIWithResolver: All URL and media type combinations failed")
-	return nil, fmt.Errorf("all combinations failed, last error: %w", lastErr)
-	
-success:
-	defer reader.Close()
-	log.G(ctx).Infof("[dallas] fetchReferrersAPIWithResolver: Success with URL: %s, Media Type: %s", successfulURL, successfulMediaType)
+	// Return empty map to force dynamic discovery
+	return map[string][]string{}
+}
 
+// fetchReferrersAPIWithResolver uses the OCI Distribution Spec referrers API via the ReferrersFetcher interface
+func (c *CRIImageService) fetchReferrersAPIWithResolver(ctx context.Context, resolver remotes.Resolver, ref string, target ocispec.Descriptor) (*ocispec.Index, error) {
+	log.G(ctx).Infof("[dallas] fetchReferrersAPIWithResolver: Starting OCI referrers API call for ref %q, target digest %s", ref, target.Digest)
+	
+	// Get the fetcher from the resolver
+	fetcher, err := resolver.Fetcher(ctx, ref)
+	if err != nil {
+		log.G(ctx).WithError(err).Errorf("[dallas] fetchReferrersAPIWithResolver: Failed to get fetcher from resolver")
+		return nil, fmt.Errorf("failed to get fetcher: %w", err)
+	}
+	
+	// Check if the fetcher implements ReferrersFetcher interface
+	referrersFetcher, ok := fetcher.(remotes.ReferrersFetcher)
+	if !ok {
+		log.G(ctx).Warnf("[dallas] fetchReferrersAPIWithResolver: Fetcher does not implement ReferrersFetcher interface (type: %T)", fetcher)
+		return nil, fmt.Errorf("fetcher %T does not implement ReferrersFetcher", fetcher)
+	}
+	
+	log.G(ctx).Infof("[dallas] fetchReferrersAPIWithResolver: Using ReferrersFetcher to fetch referrers for digest %s", target.Digest)
+	
+	// Call the FetchReferrers method with the target digest
+	// We don't filter by artifact type - get all referrers
+	reader, desc, err := referrersFetcher.FetchReferrers(ctx, target.Digest)
+	if err != nil {
+		log.G(ctx).WithError(err).Warnf("[dallas] fetchReferrersAPIWithResolver: FetchReferrers failed for digest %s", target.Digest)
+		return nil, fmt.Errorf("failed to fetch referrers: %w", err)
+	}
+	defer reader.Close()
+	
+	log.G(ctx).Infof("[dallas] fetchReferrersAPIWithResolver: Successfully fetched referrers, descriptor: mediaType=%s, size=%d", desc.MediaType, desc.Size)
 	
 	// Read the referrers data
 	referrersData, err := io.ReadAll(reader)

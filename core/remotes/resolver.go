@@ -68,6 +68,17 @@ type FetcherByDigest interface {
 	FetchByDigest(ctx context.Context, dgst digest.Digest, opts ...FetchByDigestOpts) (io.ReadCloser, ocispec.Descriptor, error)
 }
 
+// ReferrersFetcher fetches referrers for a given digest.
+// This interface is used to discover artifacts that reference a manifest,
+// such as signatures, SBOMs, or other attestations.
+type ReferrersFetcher interface {
+	// FetchReferrers fetches the referrers for the given digest.
+	// The returned ReadCloser contains an OCI Image Index with descriptors
+	// of all artifacts that reference the given digest.
+	// The artifactTypes parameter can be used to filter referrers by artifact type.
+	FetchReferrers(ctx context.Context, dgst digest.Digest, artifactTypes ...string) (io.ReadCloser, ocispec.Descriptor, error)
+}
+
 // Pusher pushes content
 type Pusher interface {
 	// Push returns a content writer for the given resource identified
