@@ -19,6 +19,7 @@ package dmverity
 
 import (
 	"bufio"
+	"fmt"
 	"strconv"
 	"strings"
 )
@@ -84,6 +85,10 @@ type FormatOutputInfo struct {
 // ParseFormatOutput parses the output from veritysetup format command
 // and returns a structured representation of the information
 func ParseFormatOutput(output string) (*FormatOutputInfo, error) {
+	if output == "" {
+		return nil, fmt.Errorf("output is empty")
+	}
+
 	info := &FormatOutputInfo{}
 
 	scanner := bufio.NewScanner(strings.NewReader(output))
@@ -107,29 +112,34 @@ func ParseFormatOutput(output string) (*FormatOutputInfo, error) {
 			info.UUID = value
 		case "Hash type":
 			hashType, err := strconv.Atoi(value)
-			if err == nil {
-				info.HashType = uint32(hashType)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse hash type %q: %w", value, err)
 			}
+			info.HashType = uint32(hashType)
 		case "Data blocks":
 			dataBlocks, err := strconv.ParseInt(value, 10, 64)
-			if err == nil {
-				info.DataBlocks = uint64(dataBlocks)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse data blocks %q: %w", value, err)
 			}
+			info.DataBlocks = uint64(dataBlocks)
 		case "Data block size":
 			dataBlockSize, err := strconv.ParseInt(value, 10, 64)
-			if err == nil {
-				info.DataBlockSize = uint32(dataBlockSize)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse data block size %q: %w", value, err)
 			}
+			info.DataBlockSize = uint32(dataBlockSize)
 		case "Hash blocks":
 			hashBlocks, err := strconv.ParseInt(value, 10, 64)
-			if err == nil {
-				info.HashBlocks = hashBlocks
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse hash blocks %q: %w", value, err)
 			}
+			info.HashBlocks = hashBlocks
 		case "Hash block size":
 			hashBlockSize, err := strconv.ParseInt(value, 10, 64)
-			if err == nil {
-				info.HashBlockSize = uint32(hashBlockSize)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse hash block size %q: %w", value, err)
 			}
+			info.HashBlockSize = uint32(hashBlockSize)
 		case "Hash algorithm":
 			info.HashAlgorithm = value
 		case "Salt":
@@ -139,5 +149,14 @@ func ParseFormatOutput(output string) (*FormatOutputInfo, error) {
 		}
 	}
 
-	return info, scanner.Err()
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error scanning output: %w", err)
+	}
+
+	// Validate required fields
+	if info.RootHash == "" {
+		return nil, fmt.Errorf("root hash not found in output")
+	}
+
+	return info, nil
 }
