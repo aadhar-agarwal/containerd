@@ -29,14 +29,13 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/opencontainers/go-digest"
 
 	"github.com/containerd/errdefs"
 	"github.com/containerd/imgcrypt/v2"
@@ -104,8 +103,7 @@ import (
 
 // PullImage pulls an image with authentication config.
 func (c *GRPCCRIImageService) PullImage(ctx context.Context, r *runtime.PullImageRequest) (_ *runtime.PullImageResponse, err error) {
-
-	imageRef := r.GetImage().GetImage() // dallas
+	imageRef := r.GetImage().GetImage()
 
 	credentials := func(host string) (string, string, error) {
 		hostauth := r.GetAuth()
@@ -215,7 +213,7 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 	}
 
 	pullReporter.start(pctx)
-	image, err := c.client.Pull(pctx, ref, pullOpts...) // dallas
+	image, err := c.client.Pull(pctx, ref, pullOpts...)
 	pcancel()
 	if err != nil {
 		return "", fmt.Errorf("failed to pull and unpack image %q: %w", ref, err)
@@ -259,59 +257,24 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 	// image.
 
 	// Pull referrers if enabled
-	log.G(ctx).Infof("[dallas] EnableReferrersPull config value: %v for image %q", c.config.EnableReferrersPull, ref)
-	log.G(ctx).Infof("[dallas] DIGEST CHECK - manifest digest (image.Target()): %s", image.Target().Digest)
-	log.G(ctx).Infof("[dallas] DIGEST CHECK - config digest (configDesc): %s", configDesc.Digest)
 	if c.config.EnableReferrersPull {
-		log.G(ctx).Infof("[dallas] Starting referrers pull for image %q with manifest digest %s and config digest %s", ref, image.Target().Digest, configDesc.Digest)
+		log.G(ctx).Debugf("Pulling referrers for image %q with manifest digest %s", ref, image.Target().Digest)
 		
-		// Try referrers for manifest digest first (most common for signatures)
-		// IMPORTANT: image.Target() returns config descriptor, not manifest descriptor!
-		// For Azure Linux busybox:1.36, the manifest digest is sha256:eec430d63f60bfcaf42664dafd179a5975f0c33610c7fc727c8f10ddaad61a06
-		log.G(ctx).Infof("[dallas] DEBUGGING: ref=%s", ref)
-		log.G(ctx).Infof("[dallas] DEBUGGING: repoDigest=%s, repoTag=%s", repoDigest, repoTag)
-		log.G(ctx).Infof("[dallas] DEBUGGING: image.Target().Digest=%s", image.Target().Digest)
-		log.G(ctx).Infof("[dallas] DEBUGGING: configDesc.Digest=%s", configDesc.Digest)
+		// Create a fresh resolver for referrers pulls
+		referrersResolver := docker.NewResolver(docker.ResolverOptions{
+			Headers: c.config.Registry.Headers,
+			Hosts:   c.registryHosts(ctx, credentials, nil),
+		})
 		
-		var manifestDesc ocispec.Descriptor
-		// For testing, hardcode the known manifest digest for Azure Linux busybox:1.36
-		if strings.Contains(ref, "liunancr.azurecr.io/azurelinux/busybox:1.36") {
-			manifestDigest := digest.Digest("sha256:eec430d63f60bfcaf42664dafd179a5975f0c33610c7fc727c8f10ddaad61a06")
-			manifestDesc = ocispec.Descriptor{
-				Digest:    manifestDigest,
-				MediaType: "application/vnd.oci.image.manifest.v1+json",
-			}
-			log.G(ctx).Infof("[dallas] ===== CALLING pullReferrers for HARDCODED MANIFEST digest: %s =====", manifestDesc.Digest)
-		} else {
-			manifestDesc = image.Target() // Fallback to image target
-			log.G(ctx).Infof("[dallas] ===== CALLING pullReferrers for MANIFEST digest (fallback): %s =====", manifestDesc.Digest)
-		}
-		
-		manifestReferrersFound := false
-		if err := c.pullReferrers(ctx, ref, manifestDesc, resolver); err != nil {
-			log.G(ctx).WithError(err).Warnf("[dallas] Failed to pull referrers for manifest digest %s: %v", manifestDesc.Digest, err)
-		} else {
-			log.G(ctx).Infof("[dallas] Successfully completed referrers pull for manifest digest %s", manifestDesc.Digest)
-			manifestReferrersFound = true
+		// Try referrers for manifest digest (most common for signatures)
+		if err := c.pullReferrers(ctx, ref, image.Target(), referrersResolver); err != nil {
+			log.G(ctx).WithError(err).Debugf("Failed to pull referrers for manifest digest %s", image.Target().Digest)
 		}
 		
 		// Also try referrers for config digest (some tools associate referrers with the image ID)
-		log.G(ctx).Infof("[dallas] ===== CALLING pullReferrers for CONFIG digest: %s =====", configDesc.Digest)
-		configReferrersFound := false
-		if err := c.pullReferrers(ctx, ref, configDesc, resolver); err != nil {
-			log.G(ctx).WithError(err).Warnf("[dallas] Failed to pull referrers for config digest %s: %v", configDesc.Digest, err)
-		} else {
-			log.G(ctx).Infof("[dallas] Successfully completed referrers pull for config digest %s - TESTING IF CODE UPDATED", configDesc.Digest)
-			configReferrersFound = true
+		if err := c.pullReferrers(ctx, ref, configDesc, referrersResolver); err != nil {
+			log.G(ctx).WithError(err).Debugf("Failed to pull referrers for config digest %s", configDesc.Digest)
 		}
-		
-		if manifestReferrersFound || configReferrersFound {
-			log.G(ctx).Infof("[dallas] Successfully completed referrers pull for image %q (manifest: %v, config: %v)", ref, manifestReferrersFound, configReferrersFound)
-		} else {
-			log.G(ctx).Warnf("[dallas] No referrers found for either manifest or config digest for image %q", ref)
-		}
-	} else {
-		log.G(ctx).Warnf("[dallas] Referrers pull is DISABLED for image %q - set enable_referrers_pull=true in containerd CRI config to enable", ref)
 	}
 
 	return imageID, nil
@@ -852,88 +815,59 @@ func (c *CRIImageService) snapshotterFromPodSandboxConfig(ctx context.Context, i
 
 // pullReferrers fetches and stores referrers (signatures, attestations, etc.) for the given image
 func (c *CRIImageService) pullReferrers(ctx context.Context, ref string, target ocispec.Descriptor, resolver remotes.Resolver) error {
-	log.G(ctx).Infof("[dallas] pullReferrers: Starting referrers pull for image %q with digest %s", ref, target.Digest)
+	log.G(ctx).Debugf("Fetching referrers for ref=%q, digest=%s", ref, target.Digest)
 	
-	// Use the distribution-spec referrers API to discover referrers
-	log.G(ctx).Infof("[dallas] pullReferrers: Getting fetcher for referrers discovery")
+	// Get the fetcher from the resolver
 	fetcher, err := resolver.Fetcher(ctx, ref)
 	if err != nil {
-		log.G(ctx).WithError(err).Errorf("[dallas] pullReferrers: Failed to get fetcher for referrers")
 		return fmt.Errorf("failed to get fetcher for referrers: %w", err)
 	}
-	log.G(ctx).Infof("[dallas] pullReferrers: Successfully obtained fetcher")
 	
-	// Try direct resolution first (works with Azure Container Registry)
-	log.G(ctx).Infof("[dallas] pullReferrers: Attempting direct referrer resolution for %q", ref)
-	directReferrersIndex, directErr := c.fetchReferrersByDirectResolution(ctx, resolver, ref, target)
-	directWorked := (directErr == nil && directReferrersIndex != nil && len(directReferrersIndex.Manifests) > 0)
-
-	// Try the OCI Distribution Spec referrers API as fallback
-	log.G(ctx).Infof("[dallas] pullReferrers: Attempting OCI referrers API for %q", ref)
-	referrersIndex, apiErr := c.fetchReferrersAPIWithResolver(ctx, resolver, ref, target)
-	apiWorked := (apiErr == nil && referrersIndex != nil && len(referrersIndex.Manifests) > 0)
-
-	// Always try tag-based discovery as well, since some registries use tag-based signatures
-	log.G(ctx).Infof("[dallas] pullReferrers: Also trying tag-based discovery for comprehensive coverage")
-	tagReferrersIndex, tagErr := c.fetchReferrersByTagsWithResolver(ctx, resolver, ref, target)
-	tagWorked := (tagErr == nil && tagReferrersIndex != nil && len(tagReferrersIndex.Manifests) > 0)
-
-	// Combine results from all methods
-	var allManifests []ocispec.Descriptor
-
-	if directWorked {
-		log.G(ctx).Infof("[dallas] pullReferrers: Direct resolution returned %d referrers", len(directReferrersIndex.Manifests))
-		allManifests = append(allManifests, directReferrersIndex.Manifests...)
-	} else if directErr != nil {
-		log.G(ctx).WithError(directErr).Warnf("[dallas] pullReferrers: Direct resolution failed")
-	}
-
-	if apiWorked {
-		log.G(ctx).Infof("[dallas] pullReferrers: OCI referrers API returned %d referrers", len(referrersIndex.Manifests))
-		allManifests = append(allManifests, referrersIndex.Manifests...)
-	} else if apiErr != nil {
-		log.G(ctx).WithError(apiErr).Warnf("[dallas] pullReferrers: OCI referrers API failed")
-	}
-
-	if tagWorked {
-		log.G(ctx).Infof("[dallas] pullReferrers: Tag-based discovery returned %d referrers", len(tagReferrersIndex.Manifests))
-		allManifests = append(allManifests, tagReferrersIndex.Manifests...)
-	} else if tagErr != nil {
-		log.G(ctx).WithError(tagErr).Warnf("[dallas] pullReferrers: Tag-based discovery failed")
-	}	// Create combined index
-	referrersIndex = &ocispec.Index{Manifests: allManifests}
-	
-	if !directWorked && !apiWorked && !tagWorked {
-		log.G(ctx).Errorf("[dallas] pullReferrers: All referrer discovery methods failed")
-		return fmt.Errorf("all referrer discovery methods failed: direct error: %v, API error: %v, tag error: %v", directErr, apiErr, tagErr)
-	}
-	
-	log.G(ctx).Infof("[dallas] pullReferrers: Combined discovery found %d total referrers", len(allManifests))
-	
-	if referrersIndex == nil || len(referrersIndex.Manifests) == 0 {
-		log.G(ctx).Infof("[dallas] pullReferrers: No referrers found for image %q", ref)
-		log.G(ctx).Infof("[dallas] pullReferrers: This could mean:")
-		log.G(ctx).Infof("[dallas] pullReferrers:   1. The image has no attached signatures/attestations")
-		log.G(ctx).Infof("[dallas] pullReferrers:   2. Referrers are stored separately (static files, different registry)")
-		log.G(ctx).Infof("[dallas] pullReferrers:   3. The image uses a different signature mechanism")
-		log.G(ctx).Infof("[dallas] pullReferrers: Referrer discovery completed successfully (direct: %v, API: %v, tags: %v)", directWorked, apiWorked, tagWorked)
+	// Use ReferrersFetcher interface for discovery
+	referrersFetcher, ok := fetcher.(remotes.ReferrersFetcher)
+	if !ok {
+		log.G(ctx).Debugf("Fetcher does not implement ReferrersFetcher interface, skipping referrers discovery")
 		return nil
 	}
 	
-	log.G(ctx).Infof("[dallas] pullReferrers: Found %d referrers for image %q", len(referrersIndex.Manifests), ref)
+	// Call FetchReferrers to get the OCI index of referrers
+	readCloser, _, err := referrersFetcher.FetchReferrers(ctx, target.Digest)
+	if err != nil {
+		log.G(ctx).WithError(err).Debugf("FetchReferrers failed for digest %s", target.Digest)
+		return err
+	}
+	defer readCloser.Close()
+	
+	// Read and parse the referrers index
+	indexData, err := io.ReadAll(readCloser)
+	if err != nil {
+		return fmt.Errorf("failed to read referrers response: %w", err)
+	}
+	
+	var referrersIndex ocispec.Index
+	if err := json.Unmarshal(indexData, &referrersIndex); err != nil {
+		return fmt.Errorf("failed to parse referrers index: %w", err)
+	}
+	
+	if len(referrersIndex.Manifests) == 0 {
+		log.G(ctx).Debugf("No referrers found for image %q with digest %s", ref, target.Digest)
+		return nil
+	}
+	
+	log.G(ctx).Infof("Found %d referrers for image %q", len(referrersIndex.Manifests), ref)
 	
 	// Pull each referrer
-	for i, desc := range referrersIndex.Manifests {
-		log.G(ctx).Infof("[dallas] pullReferrers: Pulling referrer %d/%d (digest: %s) for image %q", i+1, len(referrersIndex.Manifests), desc.Digest, ref)
-		if err := c.pullSingleReferrer(ctx, fetcher, ref, desc); err != nil {
-			log.G(ctx).WithError(err).Warnf("[dallas] pullReferrers: Failed to pull referrer %s for image %q", desc.Digest, ref)
+	for i, refDesc := range referrersIndex.Manifests {
+		log.G(ctx).Debugf("Pulling referrer %d/%d (digest: %s)", i+1, len(referrersIndex.Manifests), refDesc.Digest)
+		if err := c.pullSingleReferrer(ctx, fetcher, ref, refDesc); err != nil {
+			log.G(ctx).WithError(err).Warnf("Failed to pull referrer %s", refDesc.Digest)
 			// Continue with other referrers even if one fails
 		} else {
-			log.G(ctx).Infof("[dallas] pullReferrers: Successfully pulled referrer %s for image %q", desc.Digest, ref)
+			log.G(ctx).Debugf("Successfully pulled referrer %s", refDesc.Digest)
 		}
 	}
 	
-	log.G(ctx).Infof("[dallas] pullReferrers: Successfully pulled %d referrers for image %q", len(referrersIndex.Manifests), ref)
+	log.G(ctx).Infof("Successfully pulled %d referrers for image %q", len(referrersIndex.Manifests), ref)
 	return nil
 }
 
@@ -1444,6 +1378,7 @@ func (c *CRIImageService) fetchReferrersByTagsWithResolver(ctx context.Context, 
 
 // pullSingleReferrer pulls a single referrer artifact
 func (c *CRIImageService) pullSingleReferrer(ctx context.Context, fetcher remotes.Fetcher, originalRef string, desc ocispec.Descriptor) error {
+	log.G(ctx).Infof("[dallas] 🚀🚀🚀 NEW BINARY VERIFIED - BUILD OCT 6 2025 - WITH APPEND LOGIC 🚀🚀🚀")
 	log.G(ctx).WithFields(log.Fields{
 		"digest":    desc.Digest,
 		"mediaType": desc.MediaType,
@@ -1457,42 +1392,52 @@ func (c *CRIImageService) pullSingleReferrer(ctx context.Context, fetcher remote
 		log.G(ctx).WithError(err).Errorf("[dallas] pullSingleReferrer: Failed to fetch referrer manifest for digest %s", desc.Digest)
 		return fmt.Errorf("failed to fetch referrer manifest: %w", err)
 	}
-	defer rc.Close()
 	log.G(ctx).Infof("[dallas] pullSingleReferrer: Successfully fetched referrer manifest")
 	
 	// INSPECT REFERRER CONTENT - Read and analyze what's inside
 	if err := c.inspectAndLogReferrerContent(ctx, rc, desc); err != nil {
 		log.G(ctx).WithError(err).Warnf("[dallas] pullSingleReferrer: Failed to inspect referrer content")
-		// Reset the reader for storage
-		rc, err = fetcher.Fetch(ctx, desc)
-		if err != nil {
-			return fmt.Errorf("failed to re-fetch referrer manifest: %w", err)
-		}
-		defer rc.Close()
 	}
+	rc.Close() // Close the inspection reader
+	
+	// Re-fetch the referrer since inspectAndLogReferrerContent consumed the reader
+	log.G(ctx).Infof("[dallas] pullSingleReferrer: Re-fetching referrer manifest for storage after inspection")
+	rc, err = fetcher.Fetch(ctx, desc)
+	if err != nil {
+		return fmt.Errorf("failed to re-fetch referrer manifest for storage: %w", err)
+	}
+	defer rc.Close()
 	
 	// Store the referrer in containerd's content store
 	log.G(ctx).Infof("[dallas] pullSingleReferrer: Getting content store for referrer storage")
 	cs := c.content
-	writer, err := cs.Writer(ctx, content.WithDescriptor(desc), content.WithRef(desc.Digest.String()))
-	if err != nil {
-		log.G(ctx).WithError(err).Errorf("[dallas] pullSingleReferrer: Failed to create writer for referrer %s", desc.Digest)
-		return fmt.Errorf("failed to create writer for referrer: %w", err)
-	}
-	defer writer.Close()
-	log.G(ctx).Infof("[dallas] pullSingleReferrer: Created content store writer for referrer %s", desc.Digest)
 	
-	if _, err := io.Copy(writer, rc); err != nil {
-		log.G(ctx).WithError(err).Errorf("[dallas] pullSingleReferrer: Failed to write referrer content for %s", desc.Digest)
-		return fmt.Errorf("failed to write referrer content: %w", err)
+	// Check if content already exists
+	if _, err := cs.Info(ctx, desc.Digest); err == nil {
+		log.G(ctx).Infof("[dallas] pullSingleReferrer: Referrer %s already exists in content store, skipping storage", desc.Digest)
+	} else {
+		// Content doesn't exist, need to store it
+		writer, err := cs.Writer(ctx, content.WithDescriptor(desc), content.WithRef(desc.Digest.String()))
+		if err != nil {
+			log.G(ctx).WithError(err).Errorf("[dallas] pullSingleReferrer: Failed to create writer for referrer %s", desc.Digest)
+			return fmt.Errorf("failed to create writer for referrer: %w", err)
+		}
+		defer writer.Close()
+		log.G(ctx).Infof("[dallas] pullSingleReferrer: Created content store writer for referrer %s", desc.Digest)
+		
+		n, err := io.Copy(writer, rc)
+		if err != nil {
+			log.G(ctx).WithError(err).Errorf("[dallas] pullSingleReferrer: Failed to write referrer content for %s", desc.Digest)
+			return fmt.Errorf("failed to write referrer content: %w", err)
+		}
+		log.G(ctx).Infof("[dallas] pullSingleReferrer: Successfully wrote %d bytes of referrer content to content store (expected %d bytes)", n, desc.Size)
+		
+		if err := writer.Commit(ctx, desc.Size, desc.Digest); err != nil {
+			log.G(ctx).WithError(err).Errorf("[dallas] pullSingleReferrer: Failed to commit referrer %s", desc.Digest)
+			return fmt.Errorf("failed to commit referrer: %w", err)
+		}
+		log.G(ctx).Infof("[dallas] pullSingleReferrer: Successfully committed referrer %s to content store", desc.Digest)
 	}
-	log.G(ctx).Infof("[dallas] pullSingleReferrer: Successfully wrote referrer content to content store")
-	
-	if err := writer.Commit(ctx, desc.Size, desc.Digest); err != nil {
-		log.G(ctx).WithError(err).Errorf("[dallas] pullSingleReferrer: Failed to commit referrer %s", desc.Digest)
-		return fmt.Errorf("failed to commit referrer: %w", err)
-	}
-	log.G(ctx).Infof("[dallas] pullSingleReferrer: Successfully committed referrer %s to content store", desc.Digest)
 	
 	// If it's a manifest, we might need to pull its layers too
 	if containerdimages.IsManifestType(desc.MediaType) {
@@ -1502,6 +1447,14 @@ func (c *CRIImageService) pullSingleReferrer(ctx context.Context, fetcher remote
 			return fmt.Errorf("failed to pull referrer layers: %w", err)
 		}
 		log.G(ctx).Infof("[dallas] pullSingleReferrer: Successfully pulled layers for referrer %s", desc.Digest)
+		
+		// BRIDGE CODE: Extract signature metadata and write to filesystem for EROFS snapshotter
+		if err := c.extractAndStoreSignatureMetadata(ctx, originalRef, desc); err != nil {
+			log.G(ctx).WithError(err).Warnf("[dallas] pullSingleReferrer: Failed to extract signature metadata for referrer %s", desc.Digest)
+			// Don't fail the pull if signature extraction fails
+		} else {
+			log.G(ctx).Infof("[dallas] pullSingleReferrer: Successfully extracted signature metadata for referrer %s", desc.Digest)
+		}
 	} else {
 		log.G(ctx).Infof("[dallas] pullSingleReferrer: Referrer %s is not a manifest type (%s), skipping layer pull", desc.Digest, desc.MediaType)
 	}
@@ -1717,5 +1670,294 @@ func (c *CRIImageService) pullReferrerBlob(ctx context.Context, fetcher remotes.
 		return fmt.Errorf("failed to commit referrer blob: %w", err)
 	}
 	
+	return nil
+}
+
+// extractAndStoreSignatureMetadata extracts signature metadata from referrer manifests
+// and writes them to the filesystem for the EROFS snapshotter to consume
+func (c *CRIImageService) extractAndStoreSignatureMetadata(ctx context.Context, imageRef string, manifestDesc ocispec.Descriptor) error {
+	log.G(ctx).Infof("[dallas] ═══════════════════════════════════════════════════════════")
+	log.G(ctx).Infof("[dallas] 🔄 STARTING SIGNATURE METADATA EXTRACTION")
+	log.G(ctx).Infof("[dallas] ═══════════════════════════════════════════════════════════")
+	log.G(ctx).Infof("[dallas] Image Ref: %s", imageRef)
+	log.G(ctx).Infof("[dallas] Referrer Manifest Digest: %s", manifestDesc.Digest)
+	log.G(ctx).Infof("[dallas] Referrer Manifest MediaType: %s", manifestDesc.MediaType)
+	log.G(ctx).Infof("[dallas] Referrer Manifest Size: %d bytes", manifestDesc.Size)
+	
+	cs := c.content
+	log.G(ctx).Infof("[dallas] 📖 Step 1: Reading referrer manifest from content store...")
+	
+	// Read the referrer manifest from content store
+	manifestData, err := content.ReadBlob(ctx, cs, manifestDesc)
+	if err != nil {
+		log.G(ctx).WithError(err).Errorf("[dallas] ❌ Failed to read referrer manifest from content store")
+		return fmt.Errorf("failed to read referrer manifest: %w", err)
+	}
+	log.G(ctx).Infof("[dallas] ✅ Successfully read %d bytes of manifest data from content store", len(manifestData))
+	
+	log.G(ctx).Infof("[dallas] 📋 Step 2: Parsing manifest JSON...")
+	var manifest ocispec.Manifest
+	if err := json.Unmarshal(manifestData, &manifest); err != nil {
+		log.G(ctx).WithError(err).Errorf("[dallas] ❌ Failed to unmarshal referrer manifest JSON")
+		return fmt.Errorf("failed to unmarshal referrer manifest: %w", err)
+	}
+	log.G(ctx).Infof("[dallas] ✅ Successfully parsed manifest")
+	log.G(ctx).Infof("[dallas]    - Schema Version: %d", manifest.SchemaVersion)
+	log.G(ctx).Infof("[dallas]    - MediaType: %s", manifest.MediaType)
+	log.G(ctx).Infof("[dallas]    - ArtifactType: %s", manifest.ArtifactType)
+	log.G(ctx).Infof("[dallas]    - Config: %s (size: %d)", manifest.Config.Digest, manifest.Config.Size)
+	log.G(ctx).Infof("[dallas]    - Layer Count: %d", len(manifest.Layers))
+	
+	// Check if this is a Microsoft PKCS#7 signature artifact (Azure Linux filesystem signatures)
+	log.G(ctx).Infof("[dallas] 🔍 Step 3: Validating artifact type...")
+	if manifest.ArtifactType != "application/vnd.oci.mt.pkcs7" {
+		log.G(ctx).Infof("[dallas] ⏭️  Skipping: Not a Microsoft PKCS#7 artifact (type: %s)", manifest.ArtifactType)
+		log.G(ctx).Infof("[dallas]    Expected: application/vnd.oci.mt.pkcs7")
+		log.G(ctx).Infof("[dallas] ═══════════════════════════════════════════════════════════")
+		return nil
+	}
+	
+	log.G(ctx).Infof("[dallas] ✅ Artifact type validated: Microsoft PKCS#7 signature artifact")
+	log.G(ctx).Infof("[dallas] 🔐 This contains EROFS filesystem signatures for Azure Linux")
+	
+	// Build LayerInfo structures for each layer
+	log.G(ctx).Infof("[dallas] ───────────────────────────────────────────────────────────")
+	log.G(ctx).Infof("[dallas] 📦 Step 4: Extracting layer signature metadata...")
+	log.G(ctx).Infof("[dallas] ───────────────────────────────────────────────────────────")
+	var layerInfos []map[string]interface{}
+	
+	for i, layer := range manifest.Layers {
+		log.G(ctx).Infof("[dallas] 🔍 Processing Layer %d/%d", i+1, len(manifest.Layers))
+		log.G(ctx).Infof("[dallas]    Layer Digest: %s", layer.Digest)
+		log.G(ctx).Infof("[dallas]    Layer MediaType: %s", layer.MediaType)
+		log.G(ctx).Infof("[dallas]    Layer Size: %d bytes", layer.Size)
+		
+		// Extract metadata from layer annotations
+		if layer.Annotations == nil {
+			log.G(ctx).Warnf("[dallas] ⚠️  Layer %d has no annotations - skipping", i+1)
+			continue
+		}
+		log.G(ctx).Infof("[dallas]    Annotations found: %d entries", len(layer.Annotations))
+		
+		// Get the filesystem layer digest this signature refers to
+		layerDigest, ok := layer.Annotations["image.layer.digest"]
+		if !ok {
+			log.G(ctx).Warnf("[dallas] ⚠️  Layer %d missing 'image.layer.digest' annotation - skipping", i+1)
+			log.G(ctx).Infof("[dallas]    Available annotations: %v", layer.Annotations)
+			continue
+		}
+		log.G(ctx).Infof("[dallas]    ✅ Found filesystem layer digest: %s", layerDigest)
+		
+		// Get the EROFS root hash
+		rootHash, ok := layer.Annotations["image.layer.root_hash"]
+		if !ok {
+			log.G(ctx).Warnf("[dallas] ⚠️  Layer %d missing 'image.layer.root_hash' annotation - skipping", i+1)
+			continue
+		}
+		log.G(ctx).Infof("[dallas]    ✅ Found EROFS root hash: %s", rootHash)
+		
+		// Read the signature blob from content store
+		log.G(ctx).Infof("[dallas]    📥 Reading signature blob from content store...")
+		signatureData, err := content.ReadBlob(ctx, cs, layer)
+		if err != nil {
+			log.G(ctx).WithError(err).Warnf("[dallas] ⚠️  Failed to read signature blob for layer %d - skipping", i+1)
+			continue
+		}
+		log.G(ctx).Infof("[dallas]    ✅ Read %d bytes of signature data (PKCS#7 DER format)", len(signatureData))
+		
+		// The signature is stored as raw PKCS#7 DER bytes, encode to base64 for JSON storage
+		signatureBase64 := base64.StdEncoding.EncodeToString(signatureData)
+		log.G(ctx).Infof("[dallas]    ✅ Encoded signature to base64: %d characters", len(signatureBase64))
+		
+		log.G(ctx).Infof("[dallas] ✅ Successfully processed Layer %d:", i+1)
+		log.G(ctx).Infof("[dallas]    - Filesystem Layer: %s", layerDigest)
+		log.G(ctx).Infof("[dallas]    - EROFS Root Hash: %s", rootHash)
+		log.G(ctx).Infof("[dallas]    - Signature: %d bytes (base64: %d chars)", len(signatureData), len(signatureBase64))
+		
+		// Build LayerInfo structure matching what EROFS snapshotter expects
+		layerInfo := map[string]interface{}{
+			"digest":     layerDigest,
+			"root_hash":  rootHash,
+			"signature":  signatureBase64,
+		}
+		layerInfos = append(layerInfos, layerInfo)
+		log.G(ctx).Infof("[dallas] ───────────────────────────────────────────────────────────")
+	}
+	
+	if len(layerInfos) == 0 {
+		log.G(ctx).Warnf("[dallas] ⚠️  No valid layer info extracted from referrer manifest")
+		log.G(ctx).Warnf("[dallas]    This might indicate missing annotations or incompatible format")
+		log.G(ctx).Infof("[dallas] ═══════════════════════════════════════════════════════════")
+		return nil
+	}
+	
+	log.G(ctx).Infof("[dallas] 🎉 Successfully extracted metadata for %d layers!", len(layerInfos))
+	log.G(ctx).Infof("[dallas] ───────────────────────────────────────────────────────────")
+	log.G(ctx).Infof("[dallas] 💾 Step 5: Building JSON structure for filesystem storage...")
+	log.G(ctx).Infof("[dallas] ───────────────────────────────────────────────────────────")
+	
+	// Build ImageInfo structure (matches format expected by EROFS snapshotter)
+	imageInfo := map[string]interface{}{
+		"layers": layerInfos,
+	}
+	log.G(ctx).Infof("[dallas] ✅ Built ImageInfo structure with %d layer entries", len(layerInfos))
+	
+	// Wrap in array as expected by readSignatureManifests()
+	signatureManifest := []map[string]interface{}{imageInfo}
+	log.G(ctx).Infof("[dallas] ✅ Wrapped in array format expected by EROFS snapshotter")
+	
+	// Marshal to JSON
+	log.G(ctx).Infof("[dallas] 📝 Marshaling to JSON with indentation...")
+	jsonData, err := json.MarshalIndent(signatureManifest, "", "  ")
+	if err != nil {
+		log.G(ctx).WithError(err).Errorf("[dallas] ❌ Failed to marshal signature manifest to JSON")
+		return fmt.Errorf("failed to marshal signature manifest: %w", err)
+	}
+	log.G(ctx).Infof("[dallas] ✅ Successfully marshaled to JSON: %d bytes", len(jsonData))
+	
+	// Write to filesystem in signature-manifests directory
+	// We need to write to each snapshotter's root directory
+	log.G(ctx).Infof("[dallas] ───────────────────────────────────────────────────────────")
+	log.G(ctx).Infof("[dallas] 📁 Step 6: Writing signature manifest files to filesystem...")
+	log.G(ctx).Infof("[dallas] ───────────────────────────────────────────────────────────")
+	log.G(ctx).Infof("[dallas] Configured snapshotters: %d", len(c.imageFSPaths))
+	
+	if len(c.imageFSPaths) == 0 {
+		log.G(ctx).Warnf("[dallas] ⚠️  No snapshotter paths configured! Cannot write signature manifests.")
+		log.G(ctx).Infof("[dallas] ═══════════════════════════════════════════════════════════")
+		return fmt.Errorf("no snapshotter paths configured")
+	}
+	
+	successCount := 0
+	for snapshotterName, snapshotterPath := range c.imageFSPaths {
+		log.G(ctx).Infof("[dallas] 🔄 Processing snapshotter: %s", snapshotterName)
+		log.G(ctx).Infof("[dallas]    Root path: %s", snapshotterPath)
+		
+		// Create signature-manifests directory if it doesn't exist
+		sigManifestDir := filepath.Join(snapshotterPath, "signature-manifests")
+		log.G(ctx).Infof("[dallas]    Creating directory: %s", sigManifestDir)
+		if err := os.MkdirAll(sigManifestDir, 0755); err != nil {
+			log.G(ctx).WithError(err).Warnf("[dallas] ⚠️  Failed to create signature-manifests dir for snapshotter %s", snapshotterName)
+			continue
+		}
+		log.G(ctx).Infof("[dallas]    ✅ Directory created/verified")
+		
+		// Use a well-known filename: signatures.json (append to existing file)
+		filePath := filepath.Join(sigManifestDir, "signatures.json")
+		log.G(ctx).Infof("[dallas]    Target file: %s", filePath)
+		
+		// Read existing signatures.json if it exists
+		var existingManifests []map[string]interface{}
+		if existingData, err := os.ReadFile(filePath); err == nil {
+			log.G(ctx).Infof("[dallas]    📖 Found existing signatures.json (%d bytes), reading...", len(existingData))
+			if err := json.Unmarshal(existingData, &existingManifests); err != nil {
+				log.G(ctx).WithError(err).Warnf("[dallas] ⚠️  Failed to parse existing signatures.json, will overwrite")
+				existingManifests = nil
+			} else {
+				log.G(ctx).Infof("[dallas]    ✅ Successfully parsed existing file: %d image entries", len(existingManifests))
+			}
+		} else if os.IsNotExist(err) {
+			log.G(ctx).Infof("[dallas]    📝 No existing signatures.json, will create new file")
+		} else {
+			log.G(ctx).WithError(err).Warnf("[dallas] ⚠️  Error checking for existing file: %v", err)
+		}
+		
+		// Merge new layer info with existing entries
+		// Build a map of existing digests to avoid duplicates
+		existingDigests := make(map[string]bool)
+		if len(existingManifests) > 0 {
+			log.G(ctx).Infof("[dallas]    🔍 Scanning existing entries for duplicates...")
+			for _, manifest := range existingManifests {
+				if layersInterface, ok := manifest["layers"]; ok {
+					if layers, ok := layersInterface.([]interface{}); ok {
+						for _, layerInterface := range layers {
+							if layer, ok := layerInterface.(map[string]interface{}); ok {
+								if digest, ok := layer["digest"].(string); ok {
+									existingDigests[digest] = true
+								}
+							}
+						}
+					}
+				}
+			}
+			log.G(ctx).Infof("[dallas]    ✅ Found %d existing layer digests", len(existingDigests))
+		}
+		
+		// Add only new layers that don't already exist
+		newLayersAdded := 0
+		mergedLayers := []map[string]interface{}{}
+		
+		// First, add all layers from existing manifests
+		if len(existingManifests) > 0 {
+			for _, manifest := range existingManifests {
+				if layersInterface, ok := manifest["layers"]; ok {
+					if layers, ok := layersInterface.([]interface{}); ok {
+						for _, layerInterface := range layers {
+							if layer, ok := layerInterface.(map[string]interface{}); ok {
+								mergedLayers = append(mergedLayers, layer)
+							}
+						}
+					}
+				}
+			}
+			log.G(ctx).Infof("[dallas]    ✅ Preserved %d existing layers", len(mergedLayers))
+		}
+		
+		// Then add new layers if they don't already exist
+		log.G(ctx).Infof("[dallas]    🔍 Checking new layers for duplicates...")
+		for _, newLayer := range layerInfos {
+			digest := newLayer["digest"].(string)
+			if existingDigests[digest] {
+				log.G(ctx).Infof("[dallas]       ⏭️  Skipping duplicate: %s", digest)
+			} else {
+				mergedLayers = append(mergedLayers, newLayer)
+				newLayersAdded++
+				log.G(ctx).Infof("[dallas]       ➕ Adding new layer: %s", digest)
+			}
+		}
+		
+		log.G(ctx).Infof("[dallas]    ✅ Total layers after merge: %d (added %d new)", len(mergedLayers), newLayersAdded)
+		
+		// Build final structure with all layers in a single ImageInfo
+		finalManifest := []map[string]interface{}{
+			{
+				"layers": mergedLayers,
+			},
+		}
+		
+		// Marshal merged data to JSON
+		log.G(ctx).Infof("[dallas]    📝 Marshaling merged data to JSON...")
+		mergedJSON, err := json.MarshalIndent(finalManifest, "", "  ")
+		if err != nil {
+			log.G(ctx).WithError(err).Warnf("[dallas] ⚠️  Failed to marshal merged data")
+			continue
+		}
+		
+		// Write the merged JSON file
+		log.G(ctx).Infof("[dallas]    💾 Writing merged signatures.json (%d bytes)...", len(mergedJSON))
+		if err := os.WriteFile(filePath, mergedJSON, 0644); err != nil {
+			log.G(ctx).WithError(err).Warnf("[dallas] ⚠️  Failed to write signature manifest to %s", filePath)
+			continue
+		}
+		
+		log.G(ctx).Infof("[dallas]    ✅ File written successfully: %d bytes", len(mergedJSON))
+		log.G(ctx).Infof("[dallas]    📄 File path: %s", filePath)
+		log.G(ctx).Infof("[dallas]    📊 Stats: %d existing + %d new = %d total layers", len(mergedLayers)-newLayersAdded, newLayersAdded, len(mergedLayers))
+		successCount++
+	}
+	
+	log.G(ctx).Infof("[dallas] ───────────────────────────────────────────────────────────")
+	if successCount == 0 {
+		log.G(ctx).Errorf("[dallas] ❌ Failed to write signature manifest to any snapshotter!")
+		log.G(ctx).Infof("[dallas] ═══════════════════════════════════════════════════════════")
+		return fmt.Errorf("failed to write signature manifest to any snapshotter")
+	}
+	
+	log.G(ctx).Infof("[dallas] 🎉 SUCCESS! Signature metadata extraction complete")
+	log.G(ctx).Infof("[dallas]    ✅ Layers processed: %d", len(layerInfos))
+	log.G(ctx).Infof("[dallas]    ✅ Snapshotters updated: %d/%d", successCount, len(c.imageFSPaths))
+	log.G(ctx).Infof("[dallas]    ✅ JSON size: %d bytes", len(jsonData))
+	log.G(ctx).Infof("[dallas]    ✅ Filename: %s.json", manifestDesc.Digest.Encoded())
+	log.G(ctx).Infof("[dallas] ═══════════════════════════════════════════════════════════")
 	return nil
 }

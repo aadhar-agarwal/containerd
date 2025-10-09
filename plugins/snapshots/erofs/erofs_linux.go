@@ -109,8 +109,6 @@ type LayerInfo struct {
 // readSignatureManifests reads all signature manifest files from the signature manifests directory
 // and builds a map of layer digest to layer info
 func readSignatureManifests(root string) (map[string]LayerInfo, error) {
-	fmt.Printf("dallas readSignatureManifests\n")
-
 	digestToLayerInfoMap := make(map[string]LayerInfo)
 
 	// Get signature manifests directory path relative to the provided root
@@ -120,7 +118,6 @@ func readSignatureManifests(root string) (map[string]LayerInfo, error) {
 	if _, err := os.Stat(signatureManifestDirPath); err != nil {
 		if os.IsNotExist(err) {
 			// Directory doesn't exist, return empty digest to layer info map
-			fmt.Printf("signature manifests directory %s does not exist, skipping signature manifest loading", signatureManifestDirPath)
 			return digestToLayerInfoMap, nil
 		}
 		return nil, fmt.Errorf("failed to access signature manifests directory: %w", err)
@@ -136,7 +133,6 @@ func readSignatureManifests(root string) (map[string]LayerInfo, error) {
 	for _, file := range files {
 		// Skip directories and non-regular files (symlinks, pipes, devices, etc.)
 		if !file.Type().IsRegular() {
-			fmt.Printf("skipping non-regular file %s", file.Name())
 			continue
 		}
 
@@ -159,9 +155,6 @@ func readSignatureManifests(root string) (map[string]LayerInfo, error) {
 		for _, imageInfo := range imageInfoList {
 			for _, layerInfo := range imageInfo.Layers {
 				digestToLayerInfoMap[layerInfo.Digest] = layerInfo
-				// Log the digest, root hash and signature
-				fmt.Printf("loaded signature manifest for layer %s: root hash %s, signature %s\n",
-					layerInfo.Digest, layerInfo.RootHash, layerInfo.Signature)
 			}
 		}
 	}
@@ -172,10 +165,6 @@ func readSignatureManifests(root string) (map[string]LayerInfo, error) {
 // prepareSignatureFile writes the signature bytes to a file that can be used with veritysetup
 // Reference: https://man7.org/linux/man-pages/man8/veritysetup.8.html
 func (s *snapshotter) prepareSignatureFile(hash, signatureBase64 string) (string, error) {
-	fmt.Printf("dallas prepareSignatureFile\n")
-
-	fmt.Printf("Preparing signature file for root hash %s", hash)
-
 	// Create signatures directory if it doesn't exist
 	sigDir := filepath.Join(s.root, SignaturesDir)
 	if err := os.MkdirAll(sigDir, 0700); err != nil {
@@ -185,25 +174,36 @@ func (s *snapshotter) prepareSignatureFile(hash, signatureBase64 string) (string
 	// Create a file to store the signature bytes
 	sigPath := filepath.Join(sigDir, fmt.Sprintf("%s.sig", hash))
 
-	// Check if the signature file already exists
-	if _, err := os.Stat(sigPath); err == nil {
-		fmt.Printf("Signature file already exists at %s", sigPath)
-		return sigPath, nil
-	} else if !os.IsNotExist(err) {
-		return "", fmt.Errorf("failed to check if signature file exists: %w", err)
-	}
+	// Always regenerate the signature file to ensure it has the correct format
+	// (older versions may have written JSON text instead of binary PKCS7)
 
-	// Decode the base64 encoded signature
-	signatureBytes, err := base64.StdEncoding.DecodeString(signatureBase64)
+	// The signatureBase64 is actually a base64-encoded JSON structure containing layer_digest, root_hash, and signature
+	// First, decode the base64 to get the JSON
+	jsonBytes, err := base64.StdEncoding.DecodeString(signatureBase64)
 	if err != nil {
-		return "", fmt.Errorf("failed to decode signature: %w", err)
+		return "", fmt.Errorf("failed to decode signature JSON: %w", err)
 	}
 
-	if err := os.WriteFile(sigPath, signatureBytes, 0644); err != nil {
+	// Parse the JSON to extract just the signature field
+	var signatureData struct {
+		LayerDigest string `json:"layer_digest"`
+		RootHash    string `json:"root_hash"`
+		Signature   string `json:"signature"`
+	}
+	if err := json.Unmarshal(jsonBytes, &signatureData); err != nil {
+		return "", fmt.Errorf("failed to parse signature JSON: %w", err)
+	}
+
+	// Now decode the actual PKCS7 signature from base64
+	pkcs7Bytes, err := base64.StdEncoding.DecodeString(signatureData.Signature)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode PKCS7 signature: %w", err)
+	}
+
+	// Write the raw PKCS7 binary to the file (this is what veritysetup expects)
+	if err := os.WriteFile(sigPath, pkcs7Bytes, 0644); err != nil {
 		return "", fmt.Errorf("failed to write signature to file: %w", err)
 	}
-
-	fmt.Printf("Wrote signature to file %s", sigPath)
 
 	return sigPath, nil
 }
@@ -242,8 +242,6 @@ func isErofs(dir string) bool {
 // NewSnapshotter returns a Snapshotter which uses EROFS+OverlayFS. The layers
 // are stored under the provided root. A metadata file is stored under the root.
 func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
-	fmt.Printf("dallas NewSnapshotter\n")
-
 	var config SnapshotterConfig
 	for _, opt := range opts {
 		opt(&config)
@@ -354,8 +352,6 @@ func (s *snapshotter) layerBlobPath(id string) string {
 }
 
 func (s *snapshotter) formatLayerBlob(ctx context.Context, id string, snapshotInfo snapshots.Info) error {
-	fmt.Printf("dallas formatLayerBlob\n")
-
 	layerBlob := s.layerBlobPath(id)
 	if _, err := os.Stat(layerBlob); err != nil {
 		return fmt.Errorf("failed to find valid erofs layer blob: %w", err)
@@ -398,38 +394,29 @@ func (s *snapshotter) formatLayerBlob(ctx context.Context, id string, snapshotIn
 }
 
 func (s *snapshotter) runDmverity(ctx context.Context, id string) (string, error) {
-	fmt.Printf("dallas runDmverity\n")
-
 	layerBlob := s.layerBlobPath(id)
 	if _, err := os.Stat(layerBlob); err != nil {
 		return "", fmt.Errorf("failed to find valid erofs layer blob: %w", err)
 	}
 	dmName := fmt.Sprintf("containerd-erofs-%s", id)
 	devicePath := fmt.Sprintf("/dev/mapper/%s", dmName)
-	fmt.Printf("dallas runDmverity 1\n")
+
 	if _, err := os.Stat(devicePath); err == nil {
 		status, err := dmverity.Status(dmName)
-		fmt.Printf("dmverity device status: %v", status)
 		if err != nil {
-			fmt.Printf("dallas failed to get dmverity device status 1\n")
 			return "", fmt.Errorf("failed to get dmverity device status: %w", err)
 		}
 		if !status.IsVerified() {
-			fmt.Printf("dallas dmverity device is not verified 1\n")
 			return "", fmt.Errorf("dmverity device %s is not verified, status: %s", dmName, status.Status)
 		}
-
-		fmt.Printf("dallas runDmverity - returning 1\n")
 		return devicePath, nil
 	}
-	
-	fmt.Printf("dallas runDmverity 2\n")
+
 	dmverityContent, err := os.ReadFile(filepath.Join(s.root, "snapshots", id, ".dmverity"))
 	if err != nil {
 		return "", fmt.Errorf("failed to read dmverity root hash: %w", err)
 	}
 
-	fmt.Printf("dallas runDmverity 3\n")
 	parts := strings.Split(string(dmverityContent), "|")
 	rootHash := parts[0]
 	var originalSize uint64
@@ -440,22 +427,18 @@ func (s *snapshotter) runDmverity(ctx context.Context, id string) (string, error
 			return "", fmt.Errorf("failed to parse original size: %w", err)
 		}
 	}
-	fmt.Printf("dallas runDmverity 4\n")
 
 	// Prepare signature file if a signature is available
-	fmt.Printf("dallas - calling prepareSnapshotSignature with id=%s, rootHash=%s, ctx=%v\n", id, rootHash, ctx)
 	rootHashSignaturePath, err := s.prepareSnapshotSignature(ctx, id, rootHash)
 	if err != nil {
 		return "", err
 	}
 
 	if _, err := os.Stat(devicePath); err != nil {
-		fmt.Printf("Opening dmverity device for %s", id)
 		opts := dmverity.DefaultDmverityOptions()
 		opts.HashOffset = originalSize
 
 		if rootHashSignaturePath != "" {
-			fmt.Printf("dallas - Using signature file %s for root hash %s", rootHashSignaturePath, rootHash)
 			// The rootHashSignaturePath now contains the path to the signature file
 			// We'll pass the file path to be used with --root-hash-signature by veritysetup
 			opts.RootHashSignaturePath = rootHashSignaturePath
@@ -514,15 +497,8 @@ func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 
 func (s *snapshotter) mounts(ctx context.Context, snap storage.Snapshot, info snapshots.Info) ([]mount.Mount, error) {
 	var options []string
-	fmt.Printf("dallas mounts\n")
-
-
-	fmt.Printf("mounts called, info: %+v", info)
-	fmt.Printf("snap: %+v", snap)
 	if len(snap.ParentIDs) == 0 {
-		fmt.Printf("no parent ids")
-		m, mntpoint, err := s.lowerPath(snap.ID)
-		fmt.Printf("lowerPath: m = %v, mntpoint = %v", m, mntpoint)
+		m, _, err := s.lowerPath(snap.ID)
 		if err == nil {
 			if snap.Kind != snapshots.KindView {
 				return nil, fmt.Errorf("only works for snapshots.KindView on a committed snapshot: %w", err)
@@ -532,7 +508,6 @@ func (s *snapshotter) mounts(ctx context.Context, snap storage.Snapshot, info sn
 					return nil, err
 				}
 			}
-			fmt.Printf("formatting layer blob m: %+v", m)
 			if s.enableDmverity {
 				if err := s.formatLayerBlob(ctx, snap.ID, info); err != nil {
 					return nil, err
@@ -563,19 +538,16 @@ func (s *snapshotter) mounts(ctx context.Context, snap storage.Snapshot, info sn
 		}, nil
 	}
 
-	fmt.Printf("snap.Kind: %+v", snap.Kind)
 	if snap.Kind == snapshots.KindActive {
 		options = append(options,
 			fmt.Sprintf("workdir=%s", s.workPath(snap.ID)),
 			fmt.Sprintf("upperdir=%s", s.upperPath(snap.ID)),
 		)
 	} else if len(snap.ParentIDs) == 1 {
-		fmt.Printf("len(snap.ParentIDs) == 1")
-		m, mntpoint, err := s.lowerPath(snap.ParentIDs[0])
+		m, _, err := s.lowerPath(snap.ParentIDs[0])
 		if err != nil {
 			return nil, err
 		}
-		fmt.Printf("lowerPath: m = %v, mntpoint = %v", m, mntpoint)
 		if s.enableDmverity {
 			parentKey, err := storage.KeyFromID(ctx, snap.ParentIDs[0])
 			if err != nil {
@@ -589,7 +561,6 @@ func (s *snapshotter) mounts(ctx context.Context, snap storage.Snapshot, info sn
 				return nil, err
 			}
 		}
-		fmt.Printf("lowerPath: m = %v, mntpoint = %v\n", m, mntpoint)
 		// We have to force a loop device here too since mount[] is static.
 		// However, if we're using dmverity, it's already a block device
 		if !strings.HasPrefix(m.Source, "/dev/mapper/") {
@@ -598,14 +569,12 @@ func (s *snapshotter) mounts(ctx context.Context, snap storage.Snapshot, info sn
 		return []mount.Mount{m}, nil
 	}
 
-	fmt.Printf("snap.ParentIDs: %+v", snap.ParentIDs)
 	var lowerdirs []string
 	for i := range snap.ParentIDs {
 		m, mntpoint, err := s.lowerPath(snap.ParentIDs[i])
 		if err != nil {
 			return nil, err
 		}
-		fmt.Printf("active lowerPath: m = %v, mntpoint = %v\n", m, mntpoint)
 		// If the lowerdir is actually an EROFS committed layer but
 		// doesn't have an EROFS mount.  Let's recover now.
 		if !s.enableDmverity && mntpoint != m.Source && !isErofs(mntpoint) {
@@ -763,7 +732,6 @@ func setImmutable(path string, enable bool) error {
 
 func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snapshots.Opt) error {
 	log.G(ctx).Tracef("In Commit for key: %s, name: %s, opts: %v", key, name, opts)
-	fmt.Printf("dallas - Commit() for key: %s, name: %s, opts: %v\n", key, name, opts)
 
 	var layerBlob, upperDir string
 
