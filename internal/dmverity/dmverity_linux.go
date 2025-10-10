@@ -59,20 +59,8 @@ func actions(cmd VeritySetupCommand, args []string, opts *DmverityOptions) (stri
 		return "", fmt.Errorf("invalid dm-verity options: %w", err)
 	}
 
-	if opts.UUID != "" {
-		cmdArgs = append(cmdArgs, fmt.Sprintf("--uuid=%s", opts.UUID))
-	}
-
-	if !opts.UseSuperblock {
-		cmdArgs = append(cmdArgs, "--no-superblock")
-	}
-
-	if opts.HashType == 0 {
-		cmdArgs = append(cmdArgs, fmt.Sprintf("--format=%d", opts.HashType))
-	}
-
-	if opts.Debug {
-		cmdArgs = append(cmdArgs, "--debug")
+	if opts.Salt != "" {
+		cmdArgs = append(cmdArgs, "-s", opts.Salt)
 	}
 
 	if opts.HashAlgorithm != "" {
@@ -95,8 +83,20 @@ func actions(cmd VeritySetupCommand, args []string, opts *DmverityOptions) (stri
 		cmdArgs = append(cmdArgs, "--hash-offset", fmt.Sprintf("%d", opts.HashOffset))
 	}
 
-	if opts.Salt != "" {
-		cmdArgs = append(cmdArgs, "-s", opts.Salt)
+	if opts.HashType == 0 {
+		cmdArgs = append(cmdArgs, fmt.Sprintf("--format=%d", opts.HashType))
+	}
+
+	if !opts.UseSuperblock {
+		cmdArgs = append(cmdArgs, "--no-superblock")
+	}
+
+	if opts.Debug {
+		cmdArgs = append(cmdArgs, "--debug")
+	}
+
+	if opts.UUID != "" {
+		cmdArgs = append(cmdArgs, fmt.Sprintf("--uuid=%s", opts.UUID))
 	}
 
 	cmdArgs = append(cmdArgs, args...)

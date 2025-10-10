@@ -64,12 +64,12 @@ type DmverityOptions struct {
 // DefaultDmverityOptions returns a DmverityOptions struct with default values
 func DefaultDmverityOptions() DmverityOptions {
 	return DmverityOptions{
+		Salt:          "0000000000000000000000000000000000000000000000000000000000000000",
 		HashAlgorithm: "sha256",
 		DataBlockSize: 4096,
 		HashBlockSize: 4096,
 		HashType:      1,
 		UseSuperblock: true,
-		Salt:          "0000000000000000000000000000000000000000000000000000000000000000",
 	}
 }
 
