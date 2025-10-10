@@ -19,8 +19,10 @@ package dmverity
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/hex"
 	"fmt"
+	"os"
 	"strconv"
 	"strings"
 )
@@ -59,6 +61,8 @@ type DmverityOptions struct {
 	Debug bool
 	// UUID for device to use
 	UUID string
+	// RootHashFile specifies a file path where the root hash should be saved
+	RootHashFile string
 }
 
 // DefaultDmverityOptions returns a DmverityOptions struct with default values
@@ -128,14 +132,15 @@ type FormatOutputInfo struct {
 }
 
 // ParseFormatOutput parses the output from veritysetup format command
-// and returns a structured representation of the information
-func ParseFormatOutput(output string) (*FormatOutputInfo, error) {
+// and returns a structured representation of the information.
+func ParseFormatOutput(output string, opts *DmverityOptions) (*FormatOutputInfo, error) {
 	if output == "" {
 		return nil, fmt.Errorf("output is empty")
 	}
 
 	info := &FormatOutputInfo{}
 
+	// Parse stdout output line by line
 	scanner := bufio.NewScanner(strings.NewReader(output))
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -153,42 +158,42 @@ func ParseFormatOutput(output string) (*FormatOutputInfo, error) {
 		value := strings.TrimSpace(parts[1])
 
 		switch key {
-		case "UUID":
-			info.UUID = value
-		case "Hash type":
-			hashType, err := strconv.Atoi(value)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse hash type %q: %w", value, err)
-			}
-			info.HashType = uint32(hashType)
-		case "Data blocks":
-			dataBlocks, err := strconv.ParseInt(value, 10, 64)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse data blocks %q: %w", value, err)
-			}
-			info.DataBlocks = uint64(dataBlocks)
+		case "Salt":
+			info.Salt = value
+		case "Hash algorithm":
+			info.HashAlgorithm = value
 		case "Data block size":
 			dataBlockSize, err := strconv.ParseInt(value, 10, 64)
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse data block size %q: %w", value, err)
 			}
 			info.DataBlockSize = uint32(dataBlockSize)
-		case "Hash blocks":
-			hashBlocks, err := strconv.ParseInt(value, 10, 64)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse hash blocks %q: %w", value, err)
-			}
-			info.HashBlocks = hashBlocks
 		case "Hash block size":
 			hashBlockSize, err := strconv.ParseInt(value, 10, 64)
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse hash block size %q: %w", value, err)
 			}
 			info.HashBlockSize = uint32(hashBlockSize)
-		case "Hash algorithm":
-			info.HashAlgorithm = value
-		case "Salt":
-			info.Salt = value
+		case "Data blocks":
+			dataBlocks, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse data blocks %q: %w", value, err)
+			}
+			info.DataBlocks = uint64(dataBlocks)
+		case "Hash blocks":
+			hashBlocks, err := strconv.ParseInt(value, 10, 64)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse hash blocks %q: %w", value, err)
+			}
+			info.HashBlocks = hashBlocks
+		case "Hash type":
+			hashType, err := strconv.Atoi(value)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse hash type %q: %w", value, err)
+			}
+			info.HashType = uint32(hashType)
+		case "UUID":
+			info.UUID = value
 		case "Root hash":
 			info.RootHash = value
 		}
@@ -198,9 +203,20 @@ func ParseFormatOutput(output string) (*FormatOutputInfo, error) {
 		return nil, fmt.Errorf("error scanning output: %w", err)
 	}
 
-	// Validate root hash format
+	// If a root hash file was specified and we haven't found a root hash in stdout,
+	// read it from the file (veritysetup writes it there instead of stdout when using --root-hash-file)
+	if opts != nil && opts.RootHashFile != "" && info.RootHash == "" {
+		hashBytes, err := os.ReadFile(opts.RootHashFile)
+		if err != nil {
+			return nil, fmt.Errorf("failed to read root hash from file %q: %w", opts.RootHashFile, err)
+		}
+		// Trim any whitespace/newlines
+		info.RootHash = string(bytes.TrimSpace(hashBytes))
+	}
+
+	// Validate root hash
 	if err := ValidateRootHash(info.RootHash); err != nil {
-		return nil, fmt.Errorf("parsed root hash is invalid: %w", err)
+		return nil, fmt.Errorf("root hash is invalid: %w", err)
 	}
 
 	return info, nil

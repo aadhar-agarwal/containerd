@@ -99,6 +99,10 @@ func actions(cmd VeritySetupCommand, args []string, opts *DmverityOptions) (stri
 		cmdArgs = append(cmdArgs, fmt.Sprintf("--uuid=%s", opts.UUID))
 	}
 
+	if opts.RootHashFile != "" {
+		cmdArgs = append(cmdArgs, "--root-hash-file", opts.RootHashFile)
+	}
+
 	cmdArgs = append(cmdArgs, args...)
 
 	execCmd := exec.Command("veritysetup", cmdArgs...)
@@ -120,7 +124,8 @@ func Format(dataDevice, hashDevice string, opts *DmverityOptions) (*FormatOutput
 	}
 
 	// Parse the output to extract structured information
-	info, err := ParseFormatOutput(output)
+	// Pass opts so ParseFormatOutput can read root hash from file if RootHashFile was specified
+	info, err := ParseFormatOutput(output, opts)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse format output: %w", err)
 	}
