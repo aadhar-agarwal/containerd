@@ -54,6 +54,11 @@ func actions(cmd VeritySetupCommand, args []string, opts *DmverityOptions) (stri
 		opts = &defaultOpts
 	}
 
+	// Validate options before building command
+	if err := ValidateOptions(opts); err != nil {
+		return "", fmt.Errorf("invalid dm-verity options: %w", err)
+	}
+
 	if opts.UUID != "" {
 		cmdArgs = append(cmdArgs, fmt.Sprintf("--uuid=%s", opts.UUID))
 	}
