@@ -95,7 +95,6 @@ func ValidateOptions(opts *DmverityOptions) error {
 
 	// Validate salt format (must be hex string)
 	if opts.Salt != "" {
-		// Use hex.DecodeString to validate - it checks format and even length
 		if _, err := hex.DecodeString(opts.Salt); err != nil {
 			return fmt.Errorf("salt must be a valid hex string: %w", err)
 		}
