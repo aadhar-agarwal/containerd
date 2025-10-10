@@ -125,8 +125,6 @@ func ValidateRootHash(rootHash string) error {
 type FormatOutputInfo struct {
 	// Basic dm-verity options, reused from DmverityOptions
 	DmverityOptions
-	// Number of hash blocks in the hash area
-	HashBlocks int64
 	// Root hash value for verification
 	RootHash string
 }
@@ -180,12 +178,6 @@ func ParseFormatOutput(output string, opts *DmverityOptions) (*FormatOutputInfo,
 				return nil, fmt.Errorf("failed to parse data blocks %q: %w", value, err)
 			}
 			info.DataBlocks = uint64(dataBlocks)
-		case "Hash blocks":
-			hashBlocks, err := strconv.ParseInt(value, 10, 64)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse hash blocks %q: %w", value, err)
-			}
-			info.HashBlocks = hashBlocks
 		case "Hash type":
 			hashType, err := strconv.Atoi(value)
 			if err != nil {
