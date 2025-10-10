@@ -19,6 +19,7 @@
 package dmverity
 
 import (
+	"bytes"
 	"os"
 	"testing"
 
@@ -35,69 +36,101 @@ const (
 func TestDMVerity(t *testing.T) {
 	testutil.RequiresRoot(t)
 
-	// Skip if dm-verity is not supported
 	supported, err := IsSupported()
 	if !supported || err != nil {
 		t.Skipf("dm-verity is not supported on this system: %v", err)
 	}
 
-	// Create temp directory for test files
 	tempDir := t.TempDir()
-
-	// Create a single loop device for both data and hash
-	loopImage, loopDevice := createLoopbackDevice(t, tempDir, "1Mb")
-
+	_, loopDevice := createLoopbackDevice(t, tempDir, "1Mb")
 	defer func() {
-		err := mount.DetachLoopDevice(loopDevice)
-		assert.NoError(t, err, "failed to detach loop device for image: %s", loopImage)
+		assert.NoError(t, mount.DetachLoopDevice(loopDevice))
 	}()
 
-	// Create default options for the tests
 	opts := DmverityOptions{
-		HashAlgorithm: "sha256",
 		Salt:          "0000000000000000000000000000000000000000000000000000000000000000",
+		HashAlgorithm: "sha256",
 		DataBlockSize: 4096,
 		HashBlockSize: 4096,
+		DataBlocks:    256,
+		HashOffset:    1048576,
 		HashType:      1,
 		UseSuperblock: true,
 		Debug:         false,
-		DataBlocks:    256,
-		HashOffset:    1048576,
 	}
 
 	t.Run("IsSupported", func(t *testing.T) {
 		supported, err := IsSupported()
-		assert.True(t, supported, "dm-verity should be supported")
-		assert.NoError(t, err, "IsSupported should not return an error")
+		assert.True(t, supported)
+		assert.NoError(t, err)
 	})
 
 	var formatInfo *FormatOutputInfo
 
 	t.Run("Format", func(t *testing.T) {
 		var err error
-		// Use the same device for both data and hash
 		formatInfo, err = Format(loopDevice, loopDevice, &opts)
-		assert.NoError(t, err, "failed to format dm-verity device")
-		assert.NotEmpty(t, formatInfo.RootHash, "root hash should not be empty")
-		t.Logf("Root hash: %s", formatInfo.RootHash)
+		assert.NoError(t, err)
+		assert.NotEmpty(t, formatInfo.RootHash)
+		assert.NotEmpty(t, formatInfo.Salt)
+		assert.Equal(t, "sha256", formatInfo.HashAlgorithm)
+		assert.Equal(t, uint32(4096), formatInfo.DataBlockSize)
+		assert.Equal(t, uint32(4096), formatInfo.HashBlockSize)
+	})
+
+	t.Run("Format_WithRootHashFile", func(t *testing.T) {
+		rootHashFile, err := os.CreateTemp(tempDir, "root-hash-*.txt")
+		assert.NoError(t, err)
+		rootHashFilePath := rootHashFile.Name()
+		rootHashFile.Close()
+		defer os.Remove(rootHashFilePath)
+
+		_, loopDevice2 := createLoopbackDevice(t, tempDir, "1Mb")
+		defer func() {
+			assert.NoError(t, mount.DetachLoopDevice(loopDevice2))
+		}()
+
+		optsWithFile := opts
+		optsWithFile.RootHashFile = rootHashFilePath
+
+		formatInfo, err := Format(loopDevice2, loopDevice2, &optsWithFile)
+		assert.NoError(t, err)
+		assert.NotEmpty(t, formatInfo.RootHash)
+
+		fileContent, err := os.ReadFile(rootHashFilePath)
+		assert.NoError(t, err)
+		fileHash := string(bytes.TrimSpace(fileContent))
+		assert.Equal(t, formatInfo.RootHash, fileHash)
+	})
+
+	t.Run("Format_NoSuperblock", func(t *testing.T) {
+		_, loopDevice3 := createLoopbackDevice(t, tempDir, "1Mb")
+		defer func() {
+			assert.NoError(t, mount.DetachLoopDevice(loopDevice3))
+		}()
+
+		optsNoSuperblock := opts
+		optsNoSuperblock.UseSuperblock = false
+
+		formatInfo, err := Format(loopDevice3, loopDevice3, &optsNoSuperblock)
+		assert.NoError(t, err)
+		assert.NotEmpty(t, formatInfo.RootHash)
 	})
 
 	t.Run("Open", func(t *testing.T) {
-		output, err := Open(loopDevice, testDeviceName, loopDevice, formatInfo.RootHash, &opts)
-		assert.NoError(t, err, "failed to open dm-verity device")
-		t.Logf("Open output: %s", output)
+		_, err := Open(loopDevice, testDeviceName, loopDevice, formatInfo.RootHash, &opts)
+		assert.NoError(t, err)
 
 		_, err = os.Stat("/dev/mapper/" + testDeviceName)
-		assert.NoError(t, err, "device should exist in /dev/mapper")
+		assert.NoError(t, err)
 	})
 
 	t.Run("Close", func(t *testing.T) {
-		output, err := Close(testDeviceName)
-		assert.NoError(t, err, "failed to close dm-verity device")
-		t.Logf("Close output: %s", output)
+		_, err := Close(testDeviceName)
+		assert.NoError(t, err)
 
 		_, err = os.Stat("/dev/mapper/" + testDeviceName)
-		assert.True(t, os.IsNotExist(err), "device should not exist after closing")
+		assert.True(t, os.IsNotExist(err))
 	})
 }
 
@@ -120,4 +153,306 @@ func createLoopbackDevice(t *testing.T, dir string, size string) (string, string
 	assert.NoError(t, err)
 
 	return imagePath, loopDevice
+}
+
+func TestValidateOptions(t *testing.T) {
+	tests := []struct {
+		name    string
+		opts    *DmverityOptions
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "nil options",
+			opts:    nil,
+			wantErr: true,
+			errMsg:  "options cannot be nil",
+		},
+		{
+			name:    "valid options",
+			opts:    func() *DmverityOptions { o := DefaultDmverityOptions(); return &o }(),
+			wantErr: false,
+		},
+		{
+			name: "invalid data block size",
+			opts: func() *DmverityOptions {
+				o := DefaultDmverityOptions()
+				o.DataBlockSize = 4097 // Not a power of 2
+				return &o
+			}(),
+			wantErr: true,
+			errMsg:  "data block size",
+		},
+		{
+			name: "invalid hash block size",
+			opts: func() *DmverityOptions {
+				o := DefaultDmverityOptions()
+				o.HashBlockSize = 4097 // Not a power of 2
+				return &o
+			}(),
+			wantErr: true,
+			errMsg:  "hash block size",
+		},
+		{
+			name: "invalid salt hex",
+			opts: func() *DmverityOptions {
+				o := DefaultDmverityOptions()
+				o.Salt = "not-a-hex-string"
+				return &o
+			}(),
+			wantErr: true,
+			errMsg:  "salt must be a valid hex string",
+		},
+		{
+			name: "empty salt allowed",
+			opts: func() *DmverityOptions {
+				o := DefaultDmverityOptions()
+				o.Salt = ""
+				return &o
+			}(),
+			wantErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateOptions(tt.opts)
+			if tt.wantErr {
+				assert.Error(t, err)
+				if tt.errMsg != "" {
+					assert.Contains(t, err.Error(), tt.errMsg)
+				}
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+
+	// Test multiple valid power-of-2 sizes
+	t.Run("valid power of 2 sizes", func(t *testing.T) {
+		validSizes := []uint32{512, 1024, 2048, 4096, 8192}
+		for _, size := range validSizes {
+			opts := DefaultDmverityOptions()
+			opts.DataBlockSize = size
+			opts.HashBlockSize = size
+			err := ValidateOptions(&opts)
+			assert.NoError(t, err, "size %d should be valid", size)
+		}
+	})
+}
+
+func TestValidateRootHash(t *testing.T) {
+	tests := []struct {
+		name    string
+		hash    string
+		wantErr bool
+		errMsg  string
+	}{
+		{
+			name:    "empty root hash",
+			hash:    "",
+			wantErr: true,
+			errMsg:  "root hash cannot be empty",
+		},
+		{
+			name:    "valid root hash",
+			hash:    "bef46122f85025cf37061b16c04e2a19960a5bbcdbb656b5e91ae7927c0ad807",
+			wantErr: false,
+		},
+		{
+			name:    "invalid hex characters",
+			hash:    "not-a-valid-hex-hash",
+			wantErr: true,
+			errMsg:  "root hash must be a valid hex string",
+		},
+		{
+			name:    "odd length hex",
+			hash:    "abc",
+			wantErr: true,
+			errMsg:  "root hash must be a valid hex string",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := ValidateRootHash(tt.hash)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+func TestParseFormatOutput(t *testing.T) {
+	validOutput := `VERITY header information for /dev/loop0
+UUID:                   eebbec4a-a914-4089-aca0-22266b21bd2b
+Hash type:              1
+Data blocks:            256
+Data block size:        4096
+Hash block size:        4096
+Hash algorithm:         sha256
+Salt:                   0000000000000000000000000000000000000000000000000000000000000000
+Root hash:              bef46122f85025cf37061b16c04e2a19960a5bbcdbb656b5e91ae7927c0ad807`
+
+	tests := []struct {
+		name    string
+		output  string
+		opts    *DmverityOptions
+		wantErr bool
+		errMsg  string
+		check   func(*testing.T, *FormatOutputInfo)
+	}{
+		{
+			name:    "empty output",
+			output:  "",
+			wantErr: true,
+			errMsg:  "output is empty",
+		},
+		{
+			name:    "valid output",
+			output:  validOutput,
+			wantErr: false,
+			check: func(t *testing.T, info *FormatOutputInfo) {
+				assert.Equal(t, "bef46122f85025cf37061b16c04e2a19960a5bbcdbb656b5e91ae7927c0ad807", info.RootHash)
+				assert.Equal(t, "sha256", info.HashAlgorithm)
+				assert.Equal(t, uint32(4096), info.DataBlockSize)
+				assert.Equal(t, uint32(4096), info.HashBlockSize)
+				assert.Equal(t, uint64(256), info.DataBlocks)
+				assert.Equal(t, uint32(1), info.HashType)
+			},
+		},
+		{
+			name: "missing root hash",
+			output: `VERITY header information for /dev/loop0
+UUID:                   eebbec4a-a914-4089-aca0-22266b21bd2b
+Hash type:              1
+Data blocks:            256
+Data block size:        4096
+Hash block size:        4096
+Hash algorithm:         sha256
+Salt:                   0000000000000000000000000000000000000000000000000000000000000000`,
+			wantErr: true,
+			errMsg:  "root hash",
+		},
+		{
+			name: "invalid root hash",
+			output: `VERITY header information for /dev/loop0
+UUID:                   eebbec4a-a914-4089-aca0-22266b21bd2b
+Hash type:              1
+Data blocks:            256
+Data block size:        4096
+Hash block size:        4096
+Hash algorithm:         sha256
+Salt:                   0000000000000000000000000000000000000000000000000000000000000000
+Root hash:              not-a-valid-hex-hash`,
+			wantErr: true,
+			errMsg:  "root hash is invalid",
+		},
+		{
+			name: "invalid data block size",
+			output: `VERITY header information for /dev/loop0
+UUID:                   eebbec4a-a914-4089-aca0-22266b21bd2b
+Hash type:              1
+Data blocks:            256
+Data block size:        not-a-number
+Hash block size:        4096
+Hash algorithm:         sha256
+Salt:                   0000000000000000000000000000000000000000000000000000000000000000
+Root hash:              bef46122f85025cf37061b16c04e2a19960a5bbcdbb656b5e91ae7927c0ad807`,
+			wantErr: true,
+			errMsg:  "failed to parse data block size",
+		},
+		{
+			name: "invalid hash block size",
+			output: `VERITY header information for /dev/loop0
+UUID:                   eebbec4a-a914-4089-aca0-22266b21bd2b
+Hash type:              1
+Data blocks:            256
+Data block size:        4096
+Hash block size:        not-a-number
+Hash algorithm:         sha256
+Salt:                   0000000000000000000000000000000000000000000000000000000000000000
+Root hash:              bef46122f85025cf37061b16c04e2a19960a5bbcdbb656b5e91ae7927c0ad807`,
+			wantErr: true,
+			errMsg:  "failed to parse hash block size",
+		},
+		{
+			name: "invalid data blocks",
+			output: `VERITY header information for /dev/loop0
+UUID:                   eebbec4a-a914-4089-aca0-22266b21bd2b
+Hash type:              1
+Data blocks:            not-a-number
+Data block size:        4096
+Hash block size:        4096
+Hash algorithm:         sha256
+Salt:                   0000000000000000000000000000000000000000000000000000000000000000
+Root hash:              bef46122f85025cf37061b16c04e2a19960a5bbcdbb656b5e91ae7927c0ad807`,
+			wantErr: true,
+			errMsg:  "failed to parse data blocks",
+		},
+		{
+			name: "invalid hash type",
+			output: `VERITY header information for /dev/loop0
+UUID:                   eebbec4a-a914-4089-aca0-22266b21bd2b
+Hash type:              not-a-number
+Data blocks:            256
+Data block size:        4096
+Hash block size:        4096
+Hash algorithm:         sha256
+Salt:                   0000000000000000000000000000000000000000000000000000000000000000
+Root hash:              bef46122f85025cf37061b16c04e2a19960a5bbcdbb656b5e91ae7927c0ad807`,
+			wantErr: true,
+			errMsg:  "failed to parse hash type",
+		},
+		{
+			name: "root hash from nonexistent file",
+			output: `VERITY header information for /dev/loop0
+UUID:                   eebbec4a-a914-4089-aca0-22266b21bd2b
+Hash type:              1
+Data blocks:            256
+Data block size:        4096
+Hash block size:        4096
+Hash algorithm:         sha256
+Salt:                   0000000000000000000000000000000000000000000000000000000000000000`,
+			opts:    &DmverityOptions{RootHashFile: "/nonexistent/path/to/hash/file"},
+			wantErr: true,
+			errMsg:  "failed to read root hash from file",
+		},
+		{
+			name: "skips header lines",
+			output: `VERITY header information for /dev/loop0
+# veritysetup format /dev/loop0 /dev/loop0
+UUID:                   eebbec4a-a914-4089-aca0-22266b21bd2b
+Hash type:              1
+Data blocks:            256
+Data block size:        4096
+Hash block size:        4096
+Hash algorithm:         sha256
+Salt:                   0000000000000000000000000000000000000000000000000000000000000000
+Root hash:              bef46122f85025cf37061b16c04e2a19960a5bbcdbb656b5e91ae7927c0ad807`,
+			wantErr: false,
+			check: func(t *testing.T, info *FormatOutputInfo) {
+				assert.Equal(t, "bef46122f85025cf37061b16c04e2a19960a5bbcdbb656b5e91ae7927c0ad807", info.RootHash)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info, err := ParseFormatOutput(tt.output, tt.opts)
+			if tt.wantErr {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.errMsg)
+			} else {
+				assert.NoError(t, err)
+				assert.NotNil(t, info)
+				if tt.check != nil {
+					tt.check(t, info)
+				}
+			}
+		})
+	}
 }
