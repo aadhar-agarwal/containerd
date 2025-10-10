@@ -25,15 +25,23 @@ import (
 
 func IsSupported() (bool, error) {
 	moduleData, err := os.ReadFile("/proc/modules")
-	if err != nil || !bytes.Contains(moduleData, []byte("dm_verity")) {
+	if err != nil {
+		return false, fmt.Errorf("failed to read /proc/modules: %w", err)
+	}
+	if !bytes.Contains(moduleData, []byte("dm_verity")) {
 		return false, fmt.Errorf("dm_verity module not loaded")
 	}
-	if _, err := exec.LookPath("veritysetup"); err == nil {
-		cmd := exec.Command("veritysetup", "--version")
-		if _, err := cmd.CombinedOutput(); err != nil {
-			return false, fmt.Errorf("veritysetup not found")
-		}
+
+	veritysetupPath, err := exec.LookPath("veritysetup")
+	if err != nil {
+		return false, fmt.Errorf("veritysetup not found in PATH: %w", err)
 	}
+
+	cmd := exec.Command(veritysetupPath, "--version")
+	if _, err := cmd.CombinedOutput(); err != nil {
+		return false, fmt.Errorf("veritysetup not functional: %w", err)
+	}
+
 	return true, nil
 }
 
