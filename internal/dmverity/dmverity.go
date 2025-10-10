@@ -19,6 +19,7 @@ package dmverity
 
 import (
 	"bufio"
+	"encoding/hex"
 	"fmt"
 	"strconv"
 	"strings"
@@ -70,6 +71,51 @@ func DefaultDmverityOptions() DmverityOptions {
 		UseSuperblock: true,
 		Salt:          "0000000000000000000000000000000000000000000000000000000000000000",
 	}
+}
+
+// ValidateOptions validates dm-verity options to ensure they are valid
+// before being passed to veritysetup commands
+func ValidateOptions(opts *DmverityOptions) error {
+	if opts == nil {
+		return fmt.Errorf("options cannot be nil")
+	}
+
+	// Validate block sizes are power of 2 (kernel requirement)
+	if opts.DataBlockSize > 0 {
+		if opts.DataBlockSize&(opts.DataBlockSize-1) != 0 {
+			return fmt.Errorf("data block size %d must be a power of 2", opts.DataBlockSize)
+		}
+	}
+
+	if opts.HashBlockSize > 0 {
+		if opts.HashBlockSize&(opts.HashBlockSize-1) != 0 {
+			return fmt.Errorf("hash block size %d must be a power of 2", opts.HashBlockSize)
+		}
+	}
+
+	// Validate salt format (must be hex string)
+	if opts.Salt != "" {
+		// Use hex.DecodeString to validate - it checks format and even length
+		if _, err := hex.DecodeString(opts.Salt); err != nil {
+			return fmt.Errorf("salt must be a valid hex string: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// ValidateRootHash validates that a root hash string is in valid hexadecimal format
+func ValidateRootHash(rootHash string) error {
+	if rootHash == "" {
+		return fmt.Errorf("root hash cannot be empty")
+	}
+
+	// Validate root hash (must be hex string)
+	if _, err := hex.DecodeString(rootHash); err != nil {
+		return fmt.Errorf("root hash must be a valid hex string: %w", err)
+	}
+
+	return nil
 }
 
 // FormatOutputInfo represents the parsed information from veritysetup format command output
@@ -153,9 +199,9 @@ func ParseFormatOutput(output string) (*FormatOutputInfo, error) {
 		return nil, fmt.Errorf("error scanning output: %w", err)
 	}
 
-	// Validate required fields
-	if info.RootHash == "" {
-		return nil, fmt.Errorf("root hash not found in output")
+	// Validate root hash format
+	if err := ValidateRootHash(info.RootHash); err != nil {
+		return nil, fmt.Errorf("parsed root hash is invalid: %w", err)
 	}
 
 	return info, nil
