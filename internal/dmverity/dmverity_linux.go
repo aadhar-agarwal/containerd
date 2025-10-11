@@ -59,48 +59,65 @@ func actions(cmd VeritySetupCommand, args []string, opts *DmverityOptions) (stri
 		return "", fmt.Errorf("invalid dm-verity options: %w", err)
 	}
 
-	if opts.Salt != "" {
-		cmdArgs = append(cmdArgs, "-s", opts.Salt)
+	// Apply options based on command type according to veritysetup man page
+	switch cmd {
+	case FormatCommand:
+		// FORMAT options: --hash, --no-superblock, --format, --data-block-size,
+		// --hash-block-size, --data-blocks, --hash-offset, --salt, --uuid, --root-hash-file
+		if opts.Salt != "" {
+			cmdArgs = append(cmdArgs, "-s", opts.Salt)
+		}
+		if opts.HashAlgorithm != "" {
+			cmdArgs = append(cmdArgs, "--hash="+opts.HashAlgorithm)
+		}
+		if opts.DataBlockSize > 0 {
+			cmdArgs = append(cmdArgs, fmt.Sprintf("--data-block-size=%d", opts.DataBlockSize))
+		}
+		if opts.HashBlockSize > 0 {
+			cmdArgs = append(cmdArgs, fmt.Sprintf("--hash-block-size=%d", opts.HashBlockSize))
+		}
+		if opts.DataBlocks > 0 {
+			cmdArgs = append(cmdArgs, "--data-blocks", fmt.Sprintf("%d", opts.DataBlocks))
+		}
+		if opts.HashOffset > 0 {
+			cmdArgs = append(cmdArgs, "--hash-offset", fmt.Sprintf("%d", opts.HashOffset))
+		}
+		if opts.HashType == 0 {
+			cmdArgs = append(cmdArgs, fmt.Sprintf("--format=%d", opts.HashType))
+		}
+		if !opts.UseSuperblock {
+			cmdArgs = append(cmdArgs, "--no-superblock")
+		}
+		if opts.UUID != "" {
+			cmdArgs = append(cmdArgs, fmt.Sprintf("--uuid=%s", opts.UUID))
+		}
+		if opts.RootHashFile != "" {
+			cmdArgs = append(cmdArgs, "--root-hash-file", opts.RootHashFile)
+		}
+
+	case OpenCommand:
+		// OPEN options: --hash-offset, --no-superblock, --root-hash-file
+		// (ignoring advanced options we don't have: --ignore-corruption, --restart-on-corruption,
+		// --panic-on-corruption, --ignore-zero-blocks, --check-at-most-once,
+		// --root-hash-signature, --use-tasklets, --shared)
+		if opts.HashOffset > 0 {
+			cmdArgs = append(cmdArgs, "--hash-offset", fmt.Sprintf("%d", opts.HashOffset))
+		}
+		if !opts.UseSuperblock {
+			cmdArgs = append(cmdArgs, "--no-superblock")
+		}
+		if opts.RootHashFile != "" {
+			cmdArgs = append(cmdArgs, "--root-hash-file", opts.RootHashFile)
+		}
+
+	case CloseCommand:
+		// CLOSE has minimal options (--deferred, --cancel-deferred not implemented)
+		// No options from DmverityOptions apply to close
 	}
 
-	if opts.HashAlgorithm != "" {
-		cmdArgs = append(cmdArgs, "--hash="+opts.HashAlgorithm)
-	}
-
-	if opts.DataBlockSize > 0 {
-		cmdArgs = append(cmdArgs, fmt.Sprintf("--data-block-size=%d", opts.DataBlockSize))
-	}
-
-	if opts.HashBlockSize > 0 {
-		cmdArgs = append(cmdArgs, fmt.Sprintf("--hash-block-size=%d", opts.HashBlockSize))
-	}
-
-	if opts.DataBlocks > 0 {
-		cmdArgs = append(cmdArgs, "--data-blocks", fmt.Sprintf("%d", opts.DataBlocks))
-	}
-
-	if opts.HashOffset > 0 {
-		cmdArgs = append(cmdArgs, "--hash-offset", fmt.Sprintf("%d", opts.HashOffset))
-	}
-
-	if opts.HashType == 0 {
-		cmdArgs = append(cmdArgs, fmt.Sprintf("--format=%d", opts.HashType))
-	}
-
-	if !opts.UseSuperblock {
-		cmdArgs = append(cmdArgs, "--no-superblock")
-	}
-
+	// Debug is not command-specific, can be used with any command
 	if opts.Debug {
 		cmdArgs = append(cmdArgs, "--debug")
-	}
-
-	if opts.UUID != "" {
-		cmdArgs = append(cmdArgs, fmt.Sprintf("--uuid=%s", opts.UUID))
-	}
-
-	if opts.RootHashFile != "" {
-		cmdArgs = append(cmdArgs, "--root-hash-file", opts.RootHashFile)
 	}
 
 	cmdArgs = append(cmdArgs, args...)
