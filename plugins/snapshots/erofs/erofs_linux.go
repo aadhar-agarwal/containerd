@@ -133,6 +133,11 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		return nil, fmt.Errorf("EROFS unsupported, please `modprobe erofs`: %w", plugin.ErrSkipPlugin)
 	}
 
+	// Ensure fsverity and dmverity are not both enabled
+	if config.enableFsverity && config.enableDmverity {
+		return nil, fmt.Errorf("fsverity and dmverity cannot be enabled simultaneously")
+	}
+
 	// Check fsverity support if enabled
 	if config.enableFsverity {
 		supported, err := fsverity.IsSupported(root)
