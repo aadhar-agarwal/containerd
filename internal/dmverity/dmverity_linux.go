@@ -65,10 +65,10 @@ func actions(cmd VeritySetupCommand, args []string, opts *DmverityOptions) (stri
 		// FORMAT options: --hash, --no-superblock, --format, --data-block-size,
 		// --hash-block-size, --data-blocks, --hash-offset, --salt, --uuid, --root-hash-file
 		if opts.Salt != "" {
-			cmdArgs = append(cmdArgs, "-s", opts.Salt)
+			cmdArgs = append(cmdArgs, fmt.Sprintf("--salt=%s", opts.Salt))
 		}
 		if opts.HashAlgorithm != "" {
-			cmdArgs = append(cmdArgs, "--hash="+opts.HashAlgorithm)
+			cmdArgs = append(cmdArgs, fmt.Sprintf("--hash=%s", opts.HashAlgorithm))
 		}
 		if opts.DataBlockSize > 0 {
 			cmdArgs = append(cmdArgs, fmt.Sprintf("--data-block-size=%d", opts.DataBlockSize))
@@ -77,10 +77,10 @@ func actions(cmd VeritySetupCommand, args []string, opts *DmverityOptions) (stri
 			cmdArgs = append(cmdArgs, fmt.Sprintf("--hash-block-size=%d", opts.HashBlockSize))
 		}
 		if opts.DataBlocks > 0 {
-			cmdArgs = append(cmdArgs, "--data-blocks", fmt.Sprintf("%d", opts.DataBlocks))
+			cmdArgs = append(cmdArgs, fmt.Sprintf("--data-blocks=%d", opts.DataBlocks))
 		}
 		if opts.HashOffset > 0 {
-			cmdArgs = append(cmdArgs, "--hash-offset", fmt.Sprintf("%d", opts.HashOffset))
+			cmdArgs = append(cmdArgs, fmt.Sprintf("--hash-offset=%d", opts.HashOffset))
 		}
 		if opts.HashType == 0 {
 			cmdArgs = append(cmdArgs, fmt.Sprintf("--format=%d", opts.HashType))
@@ -92,7 +92,7 @@ func actions(cmd VeritySetupCommand, args []string, opts *DmverityOptions) (stri
 			cmdArgs = append(cmdArgs, fmt.Sprintf("--uuid=%s", opts.UUID))
 		}
 		if opts.RootHashFile != "" {
-			cmdArgs = append(cmdArgs, "--root-hash-file", opts.RootHashFile)
+			cmdArgs = append(cmdArgs, fmt.Sprintf("--root-hash-file=%s", opts.RootHashFile))
 		}
 
 	case OpenCommand:
@@ -101,13 +101,13 @@ func actions(cmd VeritySetupCommand, args []string, opts *DmverityOptions) (stri
 		// --panic-on-corruption, --ignore-zero-blocks, --check-at-most-once,
 		// --root-hash-signature, --use-tasklets, --shared)
 		if opts.HashOffset > 0 {
-			cmdArgs = append(cmdArgs, "--hash-offset", fmt.Sprintf("%d", opts.HashOffset))
+			cmdArgs = append(cmdArgs, fmt.Sprintf("--hash-offset=%d", opts.HashOffset))
 		}
 		if !opts.UseSuperblock {
 			cmdArgs = append(cmdArgs, "--no-superblock")
 		}
 		if opts.RootHashFile != "" {
-			cmdArgs = append(cmdArgs, "--root-hash-file", opts.RootHashFile)
+			cmdArgs = append(cmdArgs, fmt.Sprintf("--root-hash-file=%s", opts.RootHashFile))
 		}
 
 	case CloseCommand:
@@ -123,6 +123,10 @@ func actions(cmd VeritySetupCommand, args []string, opts *DmverityOptions) (stri
 	cmdArgs = append(cmdArgs, args...)
 
 	execCmd := exec.Command("veritysetup", cmdArgs...)
+	// Force C locale to ensure consistent, non-localized output that we can parse reliably
+	// This prevents localization issues where field names like "Root hash", "Salt", etc.
+	// might be translated to other languages, breaking our text parsing
+	execCmd.Env = append(os.Environ(), "LC_ALL=C", "LANG=C")
 	output, err := execCmd.CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("veritysetup %s failed: %w, output: %s", cmd, err, string(output))
