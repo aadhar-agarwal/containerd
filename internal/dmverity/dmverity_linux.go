@@ -18,9 +18,17 @@ package dmverity
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
+	"time"
+)
+
+const (
+	// veritysetupTimeout is the maximum time allowed for a veritysetup command to complete
+	// Format operations can take time for large devices, but should complete within 5 minutes
+	veritysetupTimeout = 5 * time.Minute
 )
 
 func IsSupported() (bool, error) {
@@ -122,7 +130,10 @@ func actions(cmd VeritySetupCommand, args []string, opts *DmverityOptions) (stri
 
 	cmdArgs = append(cmdArgs, args...)
 
-	execCmd := exec.Command("veritysetup", cmdArgs...)
+	ctx, cancel := context.WithTimeout(context.Background(), veritysetupTimeout)
+	defer cancel()
+
+	execCmd := exec.CommandContext(ctx, "veritysetup", cmdArgs...)
 	// Force C locale to ensure consistent, non-localized output that we can parse reliably
 	// This prevents localization issues where field names like "Root hash", "Salt", etc.
 	// might be translated to other languages, breaking our text parsing
