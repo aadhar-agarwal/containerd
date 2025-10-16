@@ -253,7 +253,10 @@ func (s *snapshotter) formatLayerBlob(id string) error {
 	}
 	return nil
 }
-func (s *snapshotter) runDmverity(id string) (string, error) {
+
+// getDmverityDevicePath opens a dm-verity device for the given snapshot ID if not already open,
+// and returns the device path. If the device is already open, returns the existing device path.
+func (s *snapshotter) getDmverityDevicePath(id string) (string, error) {
 	layerBlob := s.layerBlobPath(id)
 	if _, err := os.Stat(layerBlob); err != nil {
 		return "", fmt.Errorf("failed to find valid erofs layer blob: %w", err)
@@ -443,7 +446,7 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 				return nil, err
 			}
 		} else if s.enableDmverity {
-			devicePath, err := s.runDmverity(snap.ParentIDs[i])
+			devicePath, err := s.getDmverityDevicePath(snap.ParentIDs[i])
 			if err != nil {
 				return nil, err
 			}
@@ -622,9 +625,9 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 
 		if s.enableDmverity {
 			err := s.formatLayerBlob(id)
-			// _, err := s.runDmverity(id)
+			// Note: Device opening is deferred until mount time via getDmverityDevicePath
 			if err != nil {
-				return fmt.Errorf("failed to run dmverity: %w", err)
+				return fmt.Errorf("failed to format dmverity: %w", err)
 			}
 		}
 
