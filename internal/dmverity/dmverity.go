@@ -131,6 +131,9 @@ type FormatOutputInfo struct {
 
 // ParseFormatOutput parses the output from veritysetup format command
 // and returns a structured representation of the information.
+//
+// Note: This function expects English output. The calling code ensures veritysetup
+// runs with LC_ALL=C and LANG=C to prevent localization issues.
 func ParseFormatOutput(output string, opts *DmverityOptions) (*FormatOutputInfo, error) {
 	if output == "" {
 		return nil, fmt.Errorf("output is empty")
