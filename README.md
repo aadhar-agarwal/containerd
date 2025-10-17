@@ -156,7 +156,6 @@ A Kubernetes incubator project, [cri-tools](https://github.com/kubernetes-sigs/c
 * [Debugging Pods, Containers, and Images with `crictl`](./docs/cri/crictl.md)
 * [Configuring `cri` Plugins](./docs/cri/config.md)
 * [Configuring containerd](https://github.com/containerd/containerd/blob/main/docs/man/containerd-config.8.md)
-* [**🔍 Verifying OCI Referrers Pull**](REFERRERS_VERIFICATION.md) - How to verify referrers (signatures, attestations, SBOMs) are being discovered and pulled
 
 ### Communication
 
@@ -164,6 +163,8 @@ For async communication and long-running discussions please use issues and pull 
 This will be the best place to discuss design and implementation.
 
 For sync communication catch us in the `#containerd` and `#containerd-dev` Slack channels on Cloud Native Computing Foundation's (CNCF) Slack - `cloud-native.slack.com`. Everyone is welcome to join and chat. [Get Invite to CNCF Slack.](https://slack.cncf.io)
+
+Join our next community meeting hosted on Zoom. The schedule is posted on the [CNCF Calendar](https://www.cncf.io/calendar/) (search 'containerd' to filter).
 
 ### Security audit
 

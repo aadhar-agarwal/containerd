@@ -114,10 +114,9 @@ func NewService(config criconfig.ImageConfig, options *CRIImageServiceOptions) (
 		unpackDuplicationSuppressor: kmutex.New(),
 	}
 
-	log.L.Info("🎯🎯🎯 [dallas] CRI IMAGE SERVICE STARTED - BUILD OCT 6 2025 - WITH SIGNATURES.JSON APPEND LOGIC 🎯🎯🎯")
-	log.L.Infof("[dallas] CRI Image Service initialized with %d snapshotter paths", len(options.ImageFSPaths))
+	log.L.Debugf("CRI Image Service initialized with %d snapshotter paths", len(options.ImageFSPaths))
 	for name, path := range options.ImageFSPaths {
-		log.L.Infof("[dallas] Snapshotter configured: %s -> %s", name, path)
+		log.L.Debugf("Snapshotter configured: %s -> %s", name, path)
 	}
 	
 	log.L.Info("Start snapshots syncer")
