@@ -131,3 +131,41 @@ func TestErofsFsverity(t *testing.T) {
 		t.Fatal("Expected direct write to fsverity-enabled layer to fail")
 	}
 }
+
+func TestFsverityAndDmverityMutualExclusion(t *testing.T) {
+	testutil.RequiresRoot(t)
+
+	root := t.TempDir()
+
+	if !findErofs() {
+		t.Skip("check for erofs kernel support failed, skipping test")
+	}
+
+	// Try to create snapshotter with both fsverity and dmverity enabled
+	_, err := NewSnapshotter(root, WithFsverity(), WithDmverity())
+	if err == nil {
+		t.Fatal("Expected error when enabling both fsverity and dmverity")
+	}
+	if err.Error() != "fsverity and dmverity cannot be enabled simultaneously" {
+		t.Fatalf("Unexpected error message: %v", err)
+	}
+}
+
+func TestSetImmutableAndDmverityMutualExclusion(t *testing.T) {
+	testutil.RequiresRoot(t)
+
+	root := t.TempDir()
+
+	if !findErofs() {
+		t.Skip("check for erofs kernel support failed, skipping test")
+	}
+
+	// Try to create snapshotter with both setImmutable and dmverity enabled
+	_, err := NewSnapshotter(root, WithImmutable(), WithDmverity())
+	if err == nil {
+		t.Fatal("Expected error when enabling both setImmutable and dmverity")
+	}
+	if err.Error() != "setImmutable and dmverity cannot be enabled simultaneously" {
+		t.Fatalf("Unexpected error message: %v", err)
+	}
+}
