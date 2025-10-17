@@ -148,6 +148,12 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		return nil, fmt.Errorf("fsverity and dmverity cannot be enabled simultaneously")
 	}
 
+	// Ensure setImmutable and dmverity are not both enabled
+	// dmverity needs to modify the file to add hash trees, which conflicts with IMMUTABLE_FL
+	if config.setImmutable && config.enableDmverity {
+		return nil, fmt.Errorf("setImmutable and dmverity cannot be enabled simultaneously")
+	}
+
 	// Check fsverity support if enabled
 	if config.enableFsverity {
 		supported, err := fsverity.IsSupported(root)
