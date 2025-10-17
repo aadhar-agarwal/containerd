@@ -46,6 +46,8 @@ type SnapshotterConfig struct {
 	ovlOptions []string
 	// enableFsverity enables fsverity for EROFS layers
 	enableFsverity bool
+	// setImmutable enables IMMUTABLE_FL file attribute for EROFS layers
+	setImmutable bool
 	// enableDmverity enables dmverity for EROFS layers
 	enableDmverity bool
 }
@@ -67,6 +69,13 @@ func WithFsverity() Opt {
 	}
 }
 
+// WithImmutable enables IMMUTABLE_FL file attribute for EROFS layers
+func WithImmutable() Opt {
+	return func(config *SnapshotterConfig) {
+		config.setImmutable = true
+	}
+}
+
 // WithDmverity enables dmverity for EROFS layers
 func WithDmverity() Opt {
 	return func(config *SnapshotterConfig) {
@@ -85,6 +94,7 @@ type snapshotter struct {
 	ms             *storage.MetaStore
 	ovlOptions     []string
 	enableFsverity bool
+	setImmutable   bool
 	enableDmverity bool
 }
 
@@ -173,6 +183,7 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		ms:             ms,
 		ovlOptions:     config.ovlOptions,
 		enableFsverity: config.enableFsverity,
+		setImmutable:   config.setImmutable,
 		enableDmverity: config.enableDmverity,
 	}, nil
 }
@@ -550,7 +561,7 @@ func (s *snapshotter) isLayerWithDmverity(id string) bool {
 }
 
 func setImmutable(path string, enable bool) error {
-	//nolint:revive	// silence "don't use ALL_CAPS in Go names; use CamelCase"
+	//nolint:revive,staticcheck	// silence "don't use ALL_CAPS in Go names; use CamelCase"
 	const (
 		FS_IMMUTABLE_FL = 0x10
 	)
@@ -631,6 +642,12 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 			}
 		}
 
+		// Set IMMUTABLE_FL on the EROFS layer to avoid artificial data loss
+		if s.setImmutable {
+			if err := setImmutable(layerBlob, true); err != nil {
+				log.G(ctx).WithError(err).Warnf("failed to set IMMUTABLE_FL for %s", layerBlob)
+			}
+		}
 		return nil
 	})
 
