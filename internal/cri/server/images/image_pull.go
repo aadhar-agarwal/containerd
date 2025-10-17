@@ -257,23 +257,18 @@ func (c *CRIImageService) PullImage(ctx context.Context, name string, credential
 	// image.
 
 	// Pull referrers if enabled
+	// Pull referrers if enabled
 	if c.config.EnableReferrersPull {
 		log.G(ctx).Debugf("Pulling referrers for image %q with manifest digest %s", ref, image.Target().Digest)
 		
-		// Create a fresh resolver for referrers pulls
+		// Create a default resolver for referrers pulls
 		referrersResolver := docker.NewResolver(docker.ResolverOptions{
 			Headers: c.config.Registry.Headers,
-			Hosts:   c.registryHosts(ctx, credentials, nil),
 		})
 		
-		// Try referrers for manifest digest (most common for signatures)
+		// Pull referrers for manifest digest (standard OCI practice)
 		if err := c.pullReferrers(ctx, ref, image.Target(), referrersResolver); err != nil {
 			log.G(ctx).WithError(err).Debugf("Failed to pull referrers for manifest digest %s", image.Target().Digest)
-		}
-		
-		// Also try referrers for config digest (some tools associate referrers with the image ID)
-		if err := c.pullReferrers(ctx, ref, configDesc, referrersResolver); err != nil {
-			log.G(ctx).WithError(err).Debugf("Failed to pull referrers for config digest %s", configDesc.Digest)
 		}
 	}
 
