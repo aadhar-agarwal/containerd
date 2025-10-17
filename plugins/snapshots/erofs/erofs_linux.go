@@ -392,9 +392,11 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 				}
 			}
 			if s.enableDmverity {
-				if err := s.formatLayerBlob(snap.ID); err != nil {
+				devicePath, err := s.getDmverityDevicePath(snap.ID)
+				if err != nil {
 					return nil, err
 				}
+				m.Source = devicePath
 			}
 			// We have to force a loop device here since mount[] is static.
 			// However, if we're using dmverity, we don't add loop here
@@ -432,9 +434,11 @@ func (s *snapshotter) mounts(snap storage.Snapshot, info snapshots.Info) ([]moun
 			return nil, err
 		}
 		if s.enableDmverity {
-			if err := s.formatLayerBlob(snap.ParentIDs[0]); err != nil {
+			devicePath, err := s.getDmverityDevicePath(snap.ParentIDs[0])
+			if err != nil {
 				return nil, err
 			}
+			m.Source = devicePath
 		}
 		// We have to force a loop device here too since mount[] is static.
 		// However, if we're using dmverity, it's already a block device
@@ -640,18 +644,18 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 			}
 		}
 
+		// Set IMMUTABLE_FL on the EROFS layer to avoid artificial data loss
+		if s.setImmutable {
+			if err := setImmutable(layerBlob, true); err != nil {
+				log.G(ctx).WithError(err).Warnf("failed to set IMMUTABLE_FL for %s", layerBlob)
+			}
+		}
+
 		if s.enableDmverity {
 			err := s.formatLayerBlob(id)
 			// Note: Device opening is deferred until mount time via getDmverityDevicePath
 			if err != nil {
 				return fmt.Errorf("failed to format dmverity: %w", err)
-			}
-		}
-
-		// Set IMMUTABLE_FL on the EROFS layer to avoid artificial data loss
-		if s.setImmutable {
-			if err := setImmutable(layerBlob, true); err != nil {
-				log.G(ctx).WithError(err).Warnf("failed to set IMMUTABLE_FL for %s", layerBlob)
 			}
 		}
 		return nil
