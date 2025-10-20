@@ -39,6 +39,9 @@ type Config struct {
 
 	// If `SetImmutable` is enabled, IMMUTABLE_FL will be set on layer blobs.
 	SetImmutable bool `toml:"set_immutable"`
+
+	// EnableDmverity enables dmverity for EROFS layers
+	EnableDmverity bool `toml:"enable_dmverity"`
 }
 
 func init() {
@@ -70,6 +73,10 @@ func init() {
 
 			if config.SetImmutable {
 				opts = append(opts, erofs.WithImmutable())
+			}
+
+			if config.EnableDmverity {
+				opts = append(opts, erofs.WithDmverity())
 			}
 
 			ic.Meta.Exports[plugins.SnapshotterRootDir] = root
