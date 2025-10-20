@@ -139,7 +139,8 @@ func (dmverityTransformer) Transform(ctx context.Context, m mount.Mount, a []mou
 	log.G(ctx).WithField("device", devicePath).Info("dm-verity device created successfully")
 
 	// Return updated mount pointing to dm-verity device
+	// Store the device name in options so it can be retrieved during cleanup
 	m.Source = devicePath
-	m.Options = options
+	m.Options = append(options, fmt.Sprintf("X-containerd.dmverity.device-name=%s", deviceName))
 	return m, nil
 }

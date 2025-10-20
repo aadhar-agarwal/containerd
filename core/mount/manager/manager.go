@@ -385,6 +385,18 @@ func (mm *mountManager) Activate(ctx context.Context, name string, mounts []moun
 			mounts[i] = m
 		}
 
+		// Check if this mount has a dm-verity device name in options
+		// If so, use the dm-verity handler for proper cleanup
+		for _, opt := range m.Options {
+			if strings.HasPrefix(opt, "X-containerd.dmverity.device-name=") {
+				if handlers == nil {
+					handlers = make([]mount.Handler, len(mounts))
+				}
+				handlers[i] = dmverityHandler{}
+				break
+			}
+		}
+
 		// Use cleanup order for directory names
 		ci := firstSystemMount - i
 		// TODO: Go 1.25 use targetbase.WriteFile
@@ -668,7 +680,12 @@ func (mm *mountManager) Deactivate(ctx context.Context, name string) error {
 	var mountErrors error
 	for i := len(allActive) - 1; i >= 0; i-- {
 		var err error
-		if h := mm.handlers[allActive[i].Type]; h != nil {
+
+		// Check if this mount has a dm-verity device that needs cleanup
+		if _, hasDmverity := allActive[i].MountData["dmverity-device"]; hasDmverity {
+			// Use specialized dm-verity cleanup which unmounts and closes the device
+			err = unmountDmverity(ctx, allActive[i])
+		} else if h := mm.handlers[allActive[i].Type]; h != nil {
 			err = h.Unmount(ctx, allActive[i].MountPoint)
 		} else {
 			err = mount.Unmount(allActive[i].MountPoint, 0)
