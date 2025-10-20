@@ -259,13 +259,20 @@ func (s *snapshotter) formatLayerBlob(id string) error {
 			return fmt.Errorf("failed to truncate layer blob: %w", err)
 		}
 		opts.HashOffset = uint64(file_size)
-		info, err := dmverity.Format(layerBlob, layerBlob, &opts)
+
+		// Create a persistent file for the root hash
+		rootHashFile := filepath.Join(s.root, "snapshots", id, ".roothash")
+		opts.RootHashFile = rootHashFile
+
+		_, err = dmverity.Format(layerBlob, layerBlob, &opts)
 		if err != nil {
 			return fmt.Errorf("failed to format dmverity: %w", err)
 		}
-		dmverityData := fmt.Sprintf("roothash=%s\noriginalsize=%d\n", info.RootHash, fileinfo.Size())
+
+		// Write the dmverity metadata with original size
+		dmverityData := fmt.Sprintf("originalsize=%d\n", fileinfo.Size())
 		if err := os.WriteFile(filepath.Join(s.root, "snapshots", id, ".dmverity"), []byte(dmverityData), 0644); err != nil {
-			return fmt.Errorf("failed to write dmverity root hash: %w", err)
+			return fmt.Errorf("failed to write dmverity metadata: %w", err)
 		}
 	}
 	return nil
@@ -285,15 +292,14 @@ func (s *snapshotter) getDmverityDevicePath(id string) (string, error) {
 	}
 	dmverityContent, err := os.ReadFile(filepath.Join(s.root, "snapshots", id, ".dmverity"))
 	if err != nil {
-		return "", fmt.Errorf("failed to read dmverity root hash: %w", err)
+		return "", fmt.Errorf("failed to read dmverity metadata: %w", err)
 	}
 
-	var rootHash string
 	var originalSize uint64
 
 	content := string(dmverityContent)
 	// Try new format first (key=value pairs)
-	if strings.Contains(content, "roothash=") {
+	if strings.Contains(content, "originalsize=") {
 		lines := strings.Split(strings.TrimSpace(content), "\n")
 		for _, line := range lines {
 			parts := strings.SplitN(line, "=", 2)
@@ -301,10 +307,7 @@ func (s *snapshotter) getDmverityDevicePath(id string) (string, error) {
 				continue
 			}
 			key, value := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-			switch key {
-			case "roothash":
-				rootHash = value
-			case "originalsize":
+			if key == "originalsize" {
 				originalSize, err = strconv.ParseUint(value, 10, 64)
 				if err != nil {
 					return "", fmt.Errorf("failed to parse original size: %w", err)
@@ -314,7 +317,6 @@ func (s *snapshotter) getDmverityDevicePath(id string) (string, error) {
 	} else {
 		// Fall back to old format (roothash|originalsize)
 		parts := strings.Split(content, "|")
-		rootHash = parts[0]
 		if len(parts) > 1 {
 			originalSize, err = strconv.ParseUint(parts[1], 10, 64)
 			if err != nil {
@@ -326,7 +328,9 @@ func (s *snapshotter) getDmverityDevicePath(id string) (string, error) {
 	if _, err := os.Stat(devicePath); err != nil {
 		opts := dmverity.DefaultDmverityOptions()
 		opts.HashOffset = originalSize
-		_, err = dmverity.Open(layerBlob, dmName, layerBlob, string(rootHash), &opts)
+		// Use the root hash file instead of passing root hash as command-line arg
+		opts.RootHashFile = filepath.Join(s.root, "snapshots", id, ".roothash")
+		_, err = dmverity.Open(layerBlob, dmName, layerBlob, "", &opts)
 		if err != nil {
 			return "", fmt.Errorf("failed to open dmverity device: %w", err)
 		}
