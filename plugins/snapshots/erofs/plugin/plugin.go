@@ -42,6 +42,10 @@ type Config struct {
 	// If `SetImmutable` is enabled, IMMUTABLE_FL will be set on layer blobs.
 	SetImmutable bool `toml:"set_immutable"`
 
+	// EnableDmverity enables dmverity for EROFS layers
+	// Linux only
+	EnableDmverity bool `toml:"enable_dmverity"`
+
 	// DefaultSizeMB is the default size of a writable layer in MB
 	DefaultSizeMB int64 `toml:"default_size_mb"`
 }
@@ -75,6 +79,10 @@ func init() {
 
 			if config.SetImmutable {
 				opts = append(opts, erofs.WithImmutable())
+			}
+
+			if config.EnableDmverity {
+				opts = append(opts, erofs.WithDmverity())
 			}
 
 			if config.DefaultSizeMB > 0 {

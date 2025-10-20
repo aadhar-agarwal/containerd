@@ -41,6 +41,8 @@ type SnapshotterConfig struct {
 	enableFsverity bool
 	// setImmutable enables IMMUTABLE_FL file attribute for EROFS layers
 	setImmutable bool
+	// enableDmverity enables dmverity for EROFS layers
+	enableDmverity bool
 	// defaultSize creates a default size writable layer for active snapshots
 	defaultSize int64
 }
@@ -69,6 +71,13 @@ func WithImmutable() Opt {
 	}
 }
 
+// WithDmverity enables dmverity for EROFS layers
+func WithDmverity() Opt {
+	return func(config *SnapshotterConfig) {
+		config.enableDmverity = true
+	}
+}
+
 // WithDefaultSize creates a default size writable layer for active snapshots
 func WithDefaultSize(size int64) Opt {
 	return func(config *SnapshotterConfig) {
@@ -88,6 +97,7 @@ type snapshotter struct {
 	ovlOptions      []string
 	enableFsverity  bool
 	setImmutable    bool
+	enableDmverity  bool
 	defaultWritable int64
 	blockMode       bool
 }
@@ -100,12 +110,29 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		opt(&config)
 	}
 
+	// Ensure fsverity and dmverity are not both enabled
+	if config.enableFsverity && config.enableDmverity {
+		return nil, fmt.Errorf("fsverity and dmverity cannot be enabled simultaneously")
+	}
+
+	// Ensure setImmutable and dmverity are not both enabled
+	// dmverity needs to modify the file to add hash trees, which conflicts with IMMUTABLE_FL
+	if config.setImmutable && config.enableDmverity {
+		return nil, fmt.Errorf("setImmutable and dmverity cannot be enabled simultaneously")
+	}
+
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, err
 	}
 
 	if err := checkCompatibility(root); err != nil {
 		return nil, err
+	}
+
+	if config.enableDmverity {
+		if err := checkDmveritySupport(); err != nil {
+			return nil, err
+		}
 	}
 
 	// Check fsverity support if enabled
@@ -139,6 +166,7 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		ovlOptions:      config.ovlOptions,
 		enableFsverity:  config.enableFsverity,
 		setImmutable:    config.setImmutable,
+		enableDmverity:  config.enableDmverity,
 		defaultWritable: config.defaultSize,
 		blockMode:       config.defaultSize > 0,
 	}, nil
@@ -175,6 +203,17 @@ func (s *snapshotter) lowerPath(id string) (string, error) {
 	return layerBlob, nil
 }
 
+// rootHashPath returns the path to the root hash file for a given snapshot ID
+func (s *snapshotter) rootHashPath(id string) string {
+	return filepath.Join(s.root, "snapshots", id, ".roothash")
+}
+
+// isLayerWithDmverity checks if a layer has dm-verity metadata
+func (s *snapshotter) isLayerWithDmverity(id string) bool {
+	_, err := os.Stat(s.rootHashPath(id))
+	return err == nil
+}
+
 func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, kind snapshots.Kind) (string, error) {
 	td, err := os.MkdirTemp(snapshotDir, "new-")
 	if err != nil {
@@ -200,6 +239,27 @@ func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 	return td, nil
 }
 
+// createErofsMount creates a mount specification for an EROFS layer.
+// If dm-verity is enabled, it returns a dmverity/erofs mount type with root hash file option.
+// Otherwise, it returns a standard erofs mount with loop option.
+func (s *snapshotter) createErofsMount(id string, layerBlob string) mount.Mount {
+	if s.enableDmverity {
+		return mount.Mount{
+			Source: layerBlob,
+			Type:   "dmverity/erofs",
+			Options: []string{
+				"ro",
+				fmt.Sprintf("X-containerd.dmverity.roothash-file=%s", s.rootHashPath(id)),
+			},
+		}
+	}
+	return mount.Mount{
+		Source:  layerBlob,
+		Type:    "erofs",
+		Options: []string{"ro", "loop"},
+	}
+}
+
 func (s *snapshotter) mounts(snap storage.Snapshot, _ snapshots.Info) ([]mount.Mount, error) {
 	var options []string
 
@@ -213,13 +273,7 @@ func (s *snapshotter) mounts(snap storage.Snapshot, _ snapshots.Info) ([]mount.M
 					return nil, err
 				}
 			}
-			return []mount.Mount{
-				{
-					Source:  layerBlob,
-					Type:    "erofs",
-					Options: []string{"ro", "loop"},
-				},
-			}, nil
+			return []mount.Mount{s.createErofsMount(snap.ID, layerBlob)}, nil
 		}
 		// if we only have one layer/no parents then just return a bind mount as overlay
 		// will not work
@@ -297,13 +351,7 @@ func (s *snapshotter) mounts(snap storage.Snapshot, _ snapshots.Info) ([]mount.M
 		if err != nil {
 			return nil, err
 		}
-		return []mount.Mount{
-			{
-				Source:  layerBlob,
-				Type:    "erofs",
-				Options: []string{"ro", "loop"},
-			},
-		}, nil
+		return []mount.Mount{s.createErofsMount(snap.ParentIDs[0], layerBlob)}, nil
 	}
 
 	first := len(mounts)
@@ -313,11 +361,7 @@ func (s *snapshotter) mounts(snap storage.Snapshot, _ snapshots.Info) ([]mount.M
 			return nil, err
 		}
 
-		m := mount.Mount{
-			Source:  layerBlob,
-			Type:    "erofs",
-			Options: []string{"ro", "loop"},
-		}
+		m := s.createErofsMount(snap.ParentIDs[i], layerBlob)
 
 		mounts = append(mounts, m)
 	}
@@ -481,6 +525,13 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 	if s.setImmutable {
 		if err := setImmutable(layerBlob, true); err != nil {
 			log.G(ctx).WithError(err).Warnf("failed to set IMMUTABLE_FL for %s", layerBlob)
+		}
+	}
+
+	// Format dm-verity layer if enabled
+	if s.enableDmverity {
+		if err := s.formatDmverityLayer(ctx, id); err != nil {
+			return fmt.Errorf("failed to format dmverity layer: %w", err)
 		}
 	}
 

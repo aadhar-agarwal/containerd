@@ -36,9 +36,20 @@ func cleanupUpper(upper string) error {
 	return nil
 }
 
-func upperDirectoryPermission(p, parent string) error {
-	return nil
+func upperDirectoryPermission(_, _ string) error {
+	return errdefs.ErrNotImplemented
 }
+
+// checkDmveritySupport returns not implemented on non-Linux platforms
+func checkDmveritySupport() error {
+	return errdefs.ErrNotImplemented
+}
+
+// formatDmverityLayer returns not implemented on non-Linux platforms
+func (s *snapshotter) formatDmverityLayer(_ context.Context, _ string) error {
+	return errdefs.ErrNotImplemented
+}
+
 
 func convertDirToErofs(ctx context.Context, layerBlob, upperDir string) error {
 	return errdefs.ErrNotImplemented

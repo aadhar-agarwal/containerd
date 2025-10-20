@@ -21,8 +21,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
-	"syscall"
 
 	"github.com/containerd/continuity/fs"
 	"github.com/containerd/log"
@@ -30,6 +28,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/internal/dmverity"
 	"github.com/containerd/containerd/v2/internal/erofsutils"
 )
 
@@ -85,49 +84,82 @@ func setImmutable(path string, enable bool) error {
 
 func cleanupUpper(upper string) error {
 	if err := mount.UnmountAll(upper, 0); err != nil {
-		return fmt.Errorf("failed to unmount EROFS mount on %v: %w", upper, err)
+		return fmt.Errorf("failed to unmount EROFS upper path: %w", err)
 	}
 	return nil
 }
 
-func convertDirToErofs(ctx context.Context, layerBlob, upperDir string) error {
-	err := erofsutils.ConvertErofs(ctx, layerBlob, upperDir, nil)
+func convertDirToErofs(ctx context.Context, dest string, src string) error {
+	if _, err := os.Stat(dest); err == nil {
+		log.G(ctx).WithField("dest", dest).Warn("Skipping erofs conversion, already exists")
+		return nil
+	}
+	return erofsutils.ConvertErofs(ctx, dest, src, nil)
+}
+
+func upperDirectoryPermission(child string, parent string) error {
+	childStat, err := os.Stat(child)
+	if err != nil {
+		return err
+	}
+	parentStat, err := os.Stat(parent)
 	if err != nil {
 		return err
 	}
 
-	// Remove all sub-directories in the overlayfs upperdir.  Leave the
-	// overlayfs upperdir itself since it's used for Lchown.
-	fd, err := os.Open(upperDir)
-	if err != nil {
-		return err
-	}
-	defer fd.Close()
+	return os.Chmod(child, parentStat.Mode().Perm()&childStat.Mode().Perm())
+}
 
-	dirs, err := fd.Readdirnames(0)
+// checkDmveritySupport checks if dm-verity is supported on this system
+func checkDmveritySupport() error {
+	supported, err := dmverity.IsSupported()
 	if err != nil {
-		return err
+		return fmt.Errorf("failed to check dmverity support: %w", err)
 	}
-
-	for _, d := range dirs {
-		dir := filepath.Join(upperDir, d)
-		if err := os.RemoveAll(dir); err != nil {
-			log.G(ctx).WithError(err).WithField("path", dir).Warn("failed to remove directory")
-		}
+	if !supported {
+		return fmt.Errorf("dmverity is not supported on this system")
 	}
 	return nil
 }
 
-func upperDirectoryPermission(p, parent string) error {
-	st, err := os.Stat(parent)
+// formatDmverityLayer formats a committed EROFS layer with dm-verity hash tree
+func (s *snapshotter) formatDmverityLayer(ctx context.Context, id string) error {
+	// Skip if already formatted
+	if s.isLayerWithDmverity(id) {
+		log.G(ctx).WithField("id", id).Debug("Layer already has dm-verity, skipping format")
+		return nil
+	}
+
+	layerBlob := s.layerBlobPath(id)
+	fileinfo, err := os.Stat(layerBlob)
 	if err != nil {
-		return fmt.Errorf("failed to stat parent: %w", err)
+		return fmt.Errorf("failed to stat layer blob: %w", err)
 	}
 
-	stat := st.Sys().(*syscall.Stat_t)
-	if err := os.Lchown(p, int(stat.Uid), int(stat.Gid)); err != nil {
-		return fmt.Errorf("failed to chown: %w", err)
+	// Open file for truncating
+	f, err := os.OpenFile(layerBlob, os.O_RDWR, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open layer blob for truncating: %w", err)
+	}
+	defer f.Close()
+
+	fileSize := fileinfo.Size()
+	// Truncate the file to double its size to provide space for the dm-verity hash tree.
+	// The hash tree will never exceed the original data size.
+	// Most filesystems use sparse allocation, so unused space doesn't consume disk.
+	if err := f.Truncate(fileSize * 2); err != nil {
+		return fmt.Errorf("failed to truncate layer blob: %w", err)
 	}
 
+	opts := dmverity.DefaultDmverityOptions()
+	opts.HashOffset = uint64(fileSize)
+	opts.RootHashFile = s.rootHashPath(id)
+
+	_, err = dmverity.Format(layerBlob, layerBlob, &opts)
+	if err != nil {
+		return fmt.Errorf("failed to format dmverity: %w", err)
+	}
+
+	log.G(ctx).WithField("id", id).WithField("size", fileSize).Info("Successfully formatted dm-verity layer")
 	return nil
 }
