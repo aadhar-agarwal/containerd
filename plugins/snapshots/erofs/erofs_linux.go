@@ -195,24 +195,11 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 
 // Close closes the snapshotter
 func (s *snapshotter) Close() error {
-	// If dmverity is enabled, try to close all devices
-	if s.enableDmverity {
-		// Get a list of all snapshots
-		err := s.ms.WithTransaction(context.Background(), false, func(ctx context.Context) error {
-			return storage.WalkInfo(ctx, func(ctx context.Context, info snapshots.Info) error {
-				if info.Kind == snapshots.KindCommitted {
-					// Close the device if it exists
-					if err := s.closeDmverityDevice(info.Name); err != nil {
-						log.L.WithError(err).Warnf("failed to close dmverity device for %v", info.Name)
-					}
-				}
-				return nil
-			})
-		})
-		if err != nil {
-			log.L.WithError(err).Warn("error closing dmverity devices")
-		}
-	}
+	// Close the metadata store. We intentionally do not close dm-verity devices here
+	// to avoid disrupting running containers. Devices will be cleaned up when:
+	// - Snapshots are removed via Remove()
+	// - The system reboots
+	// - Manual cleanup is performed
 	return s.ms.Close()
 }
 
@@ -253,7 +240,9 @@ func (s *snapshotter) formatLayerBlob(id string) error {
 		}
 		defer f.Close()
 		file_size := fileinfo.Size()
-		// Truncate the file to double its size
+		// Truncate the file to double its size to provide space for the dm-verity hash tree.
+		// The hash tree will never exceed the original data size.
+		// Most filesystems use sparse allocation, so unused space doesn't consume disk.
 		if err := f.Truncate(file_size * 2); err != nil {
 			return fmt.Errorf("failed to truncate layer blob: %w", err)
 		}
