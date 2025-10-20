@@ -26,10 +26,12 @@ import (
 	"github.com/containerd/continuity/fs"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
+	"github.com/containerd/plugin"
 
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
+	"github.com/containerd/containerd/v2/internal/dmverity"
 	"github.com/containerd/containerd/v2/internal/fsverity"
 )
 
@@ -41,6 +43,8 @@ type SnapshotterConfig struct {
 	enableFsverity bool
 	// setImmutable enables IMMUTABLE_FL file attribute for EROFS layers
 	setImmutable bool
+	// enableDmverity enables dmverity for EROFS layers
+	enableDmverity bool
 	// defaultSize creates a default size writable layer for active snapshots
 	defaultSize int64
 }
@@ -69,6 +73,13 @@ func WithImmutable() Opt {
 	}
 }
 
+// WithDmverity enables dmverity for EROFS layers
+func WithDmverity() Opt {
+	return func(config *SnapshotterConfig) {
+		config.enableDmverity = true
+	}
+}
+
 // WithDefaultSize creates a default size writable layer for active snapshots
 func WithDefaultSize(size int64) Opt {
 	return func(config *SnapshotterConfig) {
@@ -88,6 +99,7 @@ type snapshotter struct {
 	ovlOptions      []string
 	enableFsverity  bool
 	setImmutable    bool
+	enableDmverity  bool
 	defaultWritable int64
 	blockMode       bool
 }
@@ -100,12 +112,33 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		opt(&config)
 	}
 
+	// Ensure fsverity and dmverity are not both enabled
+	if config.enableFsverity && config.enableDmverity {
+		return nil, fmt.Errorf("fsverity and dmverity cannot be enabled simultaneously")
+	}
+
+	// Ensure setImmutable and dmverity are not both enabled
+	// dmverity needs to modify the file to add hash trees, which conflicts with IMMUTABLE_FL
+	if config.setImmutable && config.enableDmverity {
+		return nil, fmt.Errorf("setImmutable and dmverity cannot be enabled simultaneously")
+	}
+
 	if err := os.MkdirAll(root, 0700); err != nil {
 		return nil, err
 	}
 
 	if err := checkCompatibility(root); err != nil {
 		return nil, err
+	}
+
+	if config.enableDmverity {
+		supported, err := dmverity.IsSupported()
+		if err != nil {
+			return nil, fmt.Errorf("dm-verity support check failed: %w", err)
+		}
+		if !supported {
+			return nil, fmt.Errorf("dm-verity is not supported on this system (veritysetup not available or dm_verity module not loaded): %w", plugin.ErrSkipPlugin)
+		}
 	}
 
 	// Check fsverity support if enabled
@@ -139,6 +172,7 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 		ovlOptions:      config.ovlOptions,
 		enableFsverity:  config.enableFsverity,
 		setImmutable:    config.setImmutable,
+		enableDmverity:  config.enableDmverity,
 		defaultWritable: config.defaultSize,
 		blockMode:       config.defaultSize > 0,
 	}, nil
@@ -175,6 +209,11 @@ func (s *snapshotter) lowerPath(id string) (string, error) {
 	return layerBlob, nil
 }
 
+// dmverityDeviceName returns the dm-verity device name for a snapshot ID
+func (s *snapshotter) dmverityDeviceName(id string) string {
+	return fmt.Sprintf("containerd-erofs-%s", id)
+}
+
 func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, kind snapshots.Kind) (string, error) {
 	td, err := os.MkdirTemp(snapshotDir, "new-")
 	if err != nil {
@@ -200,6 +239,48 @@ func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 	return td, nil
 }
 
+// createErofsMount creates a mount specification for an EROFS layer.
+// If dm-verity is enabled, it returns a dmverity/erofs mount type.
+// Otherwise, it returns a standard erofs mount with loop option.
+func (s *snapshotter) createErofsMount(id string, layerBlob string) (mount.Mount, error) {
+	if s.enableDmverity {
+		return s.createDmverityErofsMount(id, layerBlob)
+	}
+	return mount.Mount{
+		Source:  layerBlob,
+		Type:    "erofs",
+		Options: []string{"ro", "loop"},
+	}, nil
+}
+
+// createDmverityErofsMount creates a mount specification for an EROFS layer with dm-verity integrity verification.
+// It requires the layer to have an associated .dmverity metadata file.
+func (s *snapshotter) createDmverityErofsMount(id string, layerBlob string) (mount.Mount, error) {
+	// Parse dm-verity parameters from metadata file
+	metadata, err := dmverity.ParseMetadata(layerBlob)
+	if err != nil {
+		return mount.Mount{}, fmt.Errorf("failed to parse dm-verity metadata: %w", err)
+	}
+
+	// Build mount options with dm-verity parameters
+	options := []string{
+		"ro",
+		fmt.Sprintf("X-containerd.dmverity.roothash=%s", metadata.RootHash),
+		fmt.Sprintf("X-containerd.dmverity.hash-offset=%d", metadata.HashOffset),
+		fmt.Sprintf("X-containerd.dmverity.device-name=%s", s.dmverityDeviceName(id)),
+	}
+
+	if !metadata.UseSuperblock {
+		options = append(options, "X-containerd.dmverity.no-superblock")
+	}
+
+	return mount.Mount{
+		Source:  layerBlob,
+		Type:    "dmverity/erofs",
+		Options: options,
+	}, nil
+}
+
 func (s *snapshotter) mounts(snap storage.Snapshot, _ snapshots.Info) ([]mount.Mount, error) {
 	var options []string
 
@@ -213,13 +294,11 @@ func (s *snapshotter) mounts(snap storage.Snapshot, _ snapshots.Info) ([]mount.M
 					return nil, err
 				}
 			}
-			return []mount.Mount{
-				{
-					Source:  layerBlob,
-					Type:    "erofs",
-					Options: []string{"ro", "loop"},
-				},
-			}, nil
+			m, err := s.createErofsMount(snap.ID, layerBlob)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create erofs mount: %w", err)
+			}
+			return []mount.Mount{m}, nil
 		}
 		// if we only have one layer/no parents then just return a bind mount as overlay
 		// will not work
@@ -297,13 +376,11 @@ func (s *snapshotter) mounts(snap storage.Snapshot, _ snapshots.Info) ([]mount.M
 		if err != nil {
 			return nil, err
 		}
-		return []mount.Mount{
-			{
-				Source:  layerBlob,
-				Type:    "erofs",
-				Options: []string{"ro", "loop"},
-			},
-		}, nil
+		m, err := s.createErofsMount(snap.ParentIDs[0], layerBlob)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create erofs mount: %w", err)
+		}
+		return []mount.Mount{m}, nil
 	}
 
 	first := len(mounts)
@@ -313,10 +390,9 @@ func (s *snapshotter) mounts(snap storage.Snapshot, _ snapshots.Info) ([]mount.M
 			return nil, err
 		}
 
-		m := mount.Mount{
-			Source:  layerBlob,
-			Type:    "erofs",
-			Options: []string{"ro", "loop"},
+		m, err := s.createErofsMount(snap.ParentIDs[i], layerBlob)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create erofs mount for parent %s: %w", snap.ParentIDs[i], err)
 		}
 
 		mounts = append(mounts, m)
@@ -484,6 +560,8 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 		}
 	}
 
+	// Note: dm-verity formatting is handled by the EROFS differ, not here
+
 	return s.ms.WithTransaction(ctx, true, func(ctx context.Context) error {
 		if _, err := os.Stat(layerBlob); err != nil {
 			return fmt.Errorf("failed to get the converted erofs blob: %w", err)
@@ -562,6 +640,24 @@ func (s *snapshotter) Remove(ctx context.Context, key string) (err error) {
 		if err == nil {
 			if err := cleanupUpper(s.upperPath(id)); err != nil {
 				log.G(ctx).WithError(err).WithField("id", id).Warnf("failed to cleanup upperdir")
+			}
+
+			// Close dm-verity device if it exists for this snapshot
+			// The device should already be unmounted by the container runtime before Remove() is called
+			// If the device is still mounted, dmverity.Close will fail safely and we'll log a debug message
+			if s.enableDmverity && id != "" {
+				deviceName := s.dmverityDeviceName(id)
+				devicePath := fmt.Sprintf("/dev/mapper/%s", deviceName)
+				if _, statErr := os.Stat(devicePath); statErr == nil {
+					log.G(ctx).WithField("device", deviceName).Info("attempting to close dm-verity device for removed snapshot")
+					// Try to close the device - will fail if still mounted or in use
+					if _, closeErr := dmverity.Close(deviceName); closeErr != nil {
+						// This is expected if device is still in use by another container or not yet unmounted
+						log.G(ctx).WithError(closeErr).WithField("device", deviceName).Debug("failed to close dm-verity device (may still be in use or mounted)")
+					} else {
+						log.G(ctx).WithField("device", deviceName).Info("dm-verity device closed successfully")
+					}
+				}
 			}
 
 			for _, dir := range removals {
