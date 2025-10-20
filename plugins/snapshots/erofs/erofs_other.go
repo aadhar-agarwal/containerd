@@ -43,3 +43,11 @@ func upperDirectoryPermission(p, parent string) error {
 func convertDirToErofs(ctx context.Context, layerBlob, upperDir string) error {
 	return errdefs.ErrNotImplemented
 }
+
+func checkDmveritySupport() error {
+	return errdefs.ErrNotImplemented
+}
+
+func (s *snapshotter) formatDmverityLayer(ctx context.Context, id string) error {
+	return errdefs.ErrNotImplemented
+}

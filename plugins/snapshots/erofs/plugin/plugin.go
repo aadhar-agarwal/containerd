@@ -39,6 +39,10 @@ type Config struct {
 	// Linux only
 	EnableFsverity bool `toml:"enable_fsverity"`
 
+	// EnableDmverity enables dmverity for EROFS layers
+	// Linux only
+	EnableDmverity bool `toml:"enable_dmverity"`
+
 	// If `SetImmutable` is enabled, IMMUTABLE_FL will be set on layer blobs.
 	SetImmutable bool `toml:"set_immutable"`
 
@@ -71,6 +75,10 @@ func init() {
 
 			if config.EnableFsverity {
 				opts = append(opts, erofs.WithFsverity())
+			}
+
+			if config.EnableDmverity {
+				opts = append(opts, erofs.WithDmverity())
 			}
 
 			if config.SetImmutable {

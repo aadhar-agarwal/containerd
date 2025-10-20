@@ -30,6 +30,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/internal/dmverity"
 	"github.com/containerd/containerd/v2/internal/erofsutils"
 )
 
@@ -129,5 +130,62 @@ func upperDirectoryPermission(p, parent string) error {
 		return fmt.Errorf("failed to chown: %w", err)
 	}
 
+	return nil
+}
+
+// checkDmveritySupport checks if dm-verity is supported on the system
+func checkDmveritySupport() error {
+	supported, err := dmverity.IsSupported()
+	if err != nil {
+		return fmt.Errorf("failed to check dmverity support: %w", err)
+	}
+	if !supported {
+		return fmt.Errorf("dmverity is not supported on this system")
+	}
+	return nil
+}
+
+// formatDmverityLayer formats an EROFS layer blob with dm-verity hash tree
+func (s *snapshotter) formatDmverityLayer(ctx context.Context, id string) error {
+	layerBlob := s.layerBlobPath(id)
+	
+	// Skip if already formatted
+	if s.isLayerWithDmverity(id) {
+		return nil
+	}
+
+	// Get current file size
+	fileInfo, err := os.Stat(layerBlob)
+	if err != nil {
+		return fmt.Errorf("failed to stat layer blob: %w", err)
+	}
+
+	// Open file for truncating
+	f, err := os.OpenFile(layerBlob, os.O_RDWR, 0644)
+	if err != nil {
+		return fmt.Errorf("failed to open layer blob for truncating: %w", err)
+	}
+	defer f.Close()
+
+	fileSize := fileInfo.Size()
+	// Truncate the file to double its size to provide space for the dm-verity hash tree.
+	// The hash tree will never exceed the original data size.
+	// Most filesystems use sparse allocation, so unused space doesn't consume disk.
+	if err := f.Truncate(fileSize * 2); err != nil {
+		return fmt.Errorf("failed to truncate layer blob: %w", err)
+	}
+
+	// Configure dm-verity options
+	opts := dmverity.DefaultDmverityOptions()
+	opts.HashOffset = uint64(fileSize)
+	opts.RootHashFile = s.rootHashPath(id)
+
+	// Format the layer blob with dm-verity
+	_, err = dmverity.Format(layerBlob, layerBlob, &opts)
+	if err != nil {
+		return fmt.Errorf("failed to format dmverity: %w", err)
+	}
+
+	log.G(ctx).WithField("id", id).WithField("size", fileSize).Debug("formatted layer with dm-verity")
 	return nil
 }
