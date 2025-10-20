@@ -26,8 +26,8 @@ func IsSupported() (bool, error) {
 	return false, errUnsupported
 }
 
-func Format(_ string, _ string, _ *DmverityOptions) (*FormatOutputInfo, error) {
-	return nil, errUnsupported
+func Format(_ string, _ string, _ *DmverityOptions) (string, error) {
+	return "", errUnsupported
 }
 
 func Open(_ string, _ string, _ string, _ string, _ *DmverityOptions) (string, error) {
