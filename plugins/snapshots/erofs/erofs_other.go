@@ -50,7 +50,6 @@ func (s *snapshotter) formatDmverityLayer(_ context.Context, _ string) error {
 	return errdefs.ErrNotImplemented
 }
 
-
 func convertDirToErofs(ctx context.Context, layerBlob, upperDir string) error {
 	return errdefs.ErrNotImplemented
 }
