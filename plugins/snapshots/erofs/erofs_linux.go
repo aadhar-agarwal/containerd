@@ -23,7 +23,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -268,12 +267,6 @@ func (s *snapshotter) formatLayerBlob(id string) error {
 		if err != nil {
 			return fmt.Errorf("failed to format dmverity: %w", err)
 		}
-
-		// Write the dmverity metadata with original size
-		dmverityData := fmt.Sprintf("originalsize=%d\n", fileinfo.Size())
-		if err := os.WriteFile(filepath.Join(s.root, "snapshots", id, ".dmverity"), []byte(dmverityData), 0644); err != nil {
-			return fmt.Errorf("failed to write dmverity metadata: %w", err)
-		}
 	}
 	return nil
 }
@@ -290,40 +283,14 @@ func (s *snapshotter) getDmverityDevicePath(id string) (string, error) {
 	if _, err := os.Stat(devicePath); err == nil {
 		return devicePath, nil
 	}
-	dmverityContent, err := os.ReadFile(filepath.Join(s.root, "snapshots", id, ".dmverity"))
+
+	// Calculate the hash offset dynamically from the file size
+	// The file was truncated to double its original size in formatLayerBlob
+	fileInfo, err := os.Stat(layerBlob)
 	if err != nil {
-		return "", fmt.Errorf("failed to read dmverity metadata: %w", err)
+		return "", fmt.Errorf("failed to stat layer blob: %w", err)
 	}
-
-	var originalSize uint64
-
-	content := string(dmverityContent)
-	// Try new format first (key=value pairs)
-	if strings.Contains(content, "originalsize=") {
-		lines := strings.Split(strings.TrimSpace(content), "\n")
-		for _, line := range lines {
-			parts := strings.SplitN(line, "=", 2)
-			if len(parts) != 2 {
-				continue
-			}
-			key, value := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
-			if key == "originalsize" {
-				originalSize, err = strconv.ParseUint(value, 10, 64)
-				if err != nil {
-					return "", fmt.Errorf("failed to parse original size: %w", err)
-				}
-			}
-		}
-	} else {
-		// Fall back to old format (roothash|originalsize)
-		parts := strings.Split(content, "|")
-		if len(parts) > 1 {
-			originalSize, err = strconv.ParseUint(parts[1], 10, 64)
-			if err != nil {
-				return "", fmt.Errorf("failed to parse original size: %w", err)
-			}
-		}
-	}
+	originalSize := uint64(fileInfo.Size() / 2)
 
 	if _, err := os.Stat(devicePath); err != nil {
 		opts := dmverity.DefaultDmverityOptions()
@@ -568,7 +535,7 @@ func (s *snapshotter) View(ctx context.Context, key, parent string, opts ...snap
 }
 
 func (s *snapshotter) isLayerWithDmverity(id string) bool {
-	if _, err := os.Stat(filepath.Join(s.root, "snapshots", id, ".dmverity")); err != nil {
+	if _, err := os.Stat(filepath.Join(s.root, "snapshots", id, ".roothash")); err != nil {
 		return false
 	}
 	return true
