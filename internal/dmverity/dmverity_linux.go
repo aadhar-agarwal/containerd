@@ -167,7 +167,13 @@ func Format(dataDevice, hashDevice string, opts *DmverityOptions) (string, error
 
 // Open creates a read-only device-mapper target for transparent integrity verification
 func Open(dataDevice string, name string, hashDevice string, rootHash string, opts *DmverityOptions) (string, error) {
-	args := []string{dataDevice, name, hashDevice, rootHash}
+	var args []string
+	// If RootHashFile is provided, use the alternate open syntax without root hash as command arg
+	if opts != nil && opts.RootHashFile != "" {
+		args = []string{dataDevice, name, hashDevice}
+	} else {
+		args = []string{dataDevice, name, hashDevice, rootHash}
+	}
 	output, err := actions(OpenCommand, args, opts)
 	if err != nil {
 		return "", fmt.Errorf("failed to open dm-verity device: %w, output: %s", err, output)
