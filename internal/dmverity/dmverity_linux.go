@@ -146,23 +146,23 @@ func actions(cmd VeritySetupCommand, args []string, opts *DmverityOptions) (stri
 	return string(output), nil
 }
 
-// Format creates a dm-verity hash for a data device
-// If hashDevice is the same as dataDevice, the hash will be stored on the same device
-func Format(dataDevice, hashDevice string, opts *DmverityOptions) (*FormatOutputInfo, error) {
+// Format creates a dm-verity hash for a data device and returns the root hash.
+// If hashDevice is the same as dataDevice, the hash will be stored on the same device.
+func Format(dataDevice, hashDevice string, opts *DmverityOptions) (string, error) {
 	args := []string{dataDevice, hashDevice}
 	output, err := actions(FormatCommand, args, opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to format dm-verity device: %w, output: %s", err, output)
+		return "", fmt.Errorf("failed to format dm-verity device: %w, output: %s", err, output)
 	}
 
-	// Parse the output to extract structured information
-	// Pass opts so ParseFormatOutput can read root hash from file if RootHashFile was specified
-	info, err := ParseFormatOutput(output, opts)
+	// Extract the root hash from the format output
+	// Pass opts so ExtractRootHash can read root hash from file if RootHashFile was specified
+	rootHash, err := ExtractRootHash(output, opts)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse format output: %w", err)
+		return "", fmt.Errorf("failed to extract root hash: %w", err)
 	}
 
-	return info, nil
+	return rootHash, nil
 }
 
 // Open creates a read-only device-mapper target for transparent integrity verification

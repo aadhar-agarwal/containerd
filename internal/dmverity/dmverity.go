@@ -23,8 +23,9 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
-	"strconv"
 	"strings"
+
+	"github.com/containerd/log"
 )
 
 // VeritySetupCommand represents the type of veritysetup command to execute
@@ -121,98 +122,53 @@ func ValidateRootHash(rootHash string) error {
 	return nil
 }
 
-// FormatOutputInfo represents the parsed information from veritysetup format command output
-type FormatOutputInfo struct {
-	// Basic dm-verity options, reused from DmverityOptions
-	DmverityOptions
-	// Root hash value for verification
-	RootHash string
-}
-
-// ParseFormatOutput parses the output from veritysetup format command
-// and returns a structured representation of the information.
+// ExtractRootHash extracts the root hash from veritysetup format command output.
+// It first attempts to read from the root hash file (if specified in opts.RootHashFile),
+// then falls back to parsing the stdout output.
 //
-// Note: This function expects English output. The calling code ensures veritysetup
-// runs with LC_ALL=C and LANG=C to prevent localization issues.
-func ParseFormatOutput(output string, opts *DmverityOptions) (*FormatOutputInfo, error) {
-	if output == "" {
-		return nil, fmt.Errorf("output is empty")
-	}
+// Note: This function expects English output when parsing stdout. The calling code
+// ensures veritysetup runs with LC_ALL=C and LANG=C to prevent localization issues.
+func ExtractRootHash(output string, opts *DmverityOptions) (string, error) {
+	log.L.Debugf("veritysetup format output:\n%s", output)
 
-	info := &FormatOutputInfo{}
+	var rootHash string
 
-	// Parse stdout output line by line
-	scanner := bufio.NewScanner(strings.NewReader(output))
-	for scanner.Scan() {
-		line := scanner.Text()
-		// Skip the header line and command echo line
-		if strings.HasPrefix(line, "VERITY header") || strings.HasPrefix(line, "# veritysetup") {
-			continue
-		}
-
-		parts := strings.Split(line, ":")
-		if len(parts) != 2 {
-			continue
-		}
-
-		key := strings.TrimSpace(parts[0])
-		value := strings.TrimSpace(parts[1])
-
-		switch key {
-		case "Salt":
-			info.Salt = value
-		case "Hash algorithm":
-			info.HashAlgorithm = value
-		case "Data block size":
-			dataBlockSize, err := strconv.ParseInt(value, 10, 64)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse data block size %q: %w", value, err)
-			}
-			info.DataBlockSize = uint32(dataBlockSize)
-		case "Hash block size":
-			hashBlockSize, err := strconv.ParseInt(value, 10, 64)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse hash block size %q: %w", value, err)
-			}
-			info.HashBlockSize = uint32(hashBlockSize)
-		case "Data blocks":
-			dataBlocks, err := strconv.ParseInt(value, 10, 64)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse data blocks %q: %w", value, err)
-			}
-			info.DataBlocks = uint64(dataBlocks)
-		case "Hash type":
-			hashType, err := strconv.Atoi(value)
-			if err != nil {
-				return nil, fmt.Errorf("failed to parse hash type %q: %w", value, err)
-			}
-			info.HashType = uint32(hashType)
-		case "UUID":
-			info.UUID = value
-		case "Root hash":
-			info.RootHash = value
-		}
-	}
-
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("error scanning output: %w", err)
-	}
-
-	// If a root hash file was specified and we haven't found a root hash in stdout,
-	// read it from the file (veritysetup writes it there instead of stdout when using --root-hash-file)
-	if opts != nil && opts.RootHashFile != "" && info.RootHash == "" {
+	// Try to read from root hash file first (if specified)
+	if opts != nil && opts.RootHashFile != "" {
 		hashBytes, err := os.ReadFile(opts.RootHashFile)
 		if err != nil {
-			return nil, fmt.Errorf("failed to read root hash from file %q: %w", opts.RootHashFile, err)
+			return "", fmt.Errorf("failed to read root hash from file %q: %w", opts.RootHashFile, err)
 		}
 		// Trim any whitespace/newlines
-		info.RootHash = string(bytes.TrimSpace(hashBytes))
+		rootHash = string(bytes.TrimSpace(hashBytes))
+	} else {
+		// Parse stdout output to find the root hash
+		if output == "" {
+			return "", fmt.Errorf("output is empty")
+		}
+
+		scanner := bufio.NewScanner(strings.NewReader(output))
+		for scanner.Scan() {
+			line := scanner.Text()
+			// Look for the "Root hash:" line
+			if strings.HasPrefix(line, "Root hash:") {
+				parts := strings.Split(line, ":")
+				if len(parts) == 2 {
+					rootHash = strings.TrimSpace(parts[1])
+					break
+				}
+			}
+		}
+
+		if err := scanner.Err(); err != nil {
+			return "", fmt.Errorf("error scanning output: %w", err)
+		}
 	}
 
 	// Validate root hash
-	if err := ValidateRootHash(info.RootHash); err != nil {
-		return nil, fmt.Errorf("root hash is invalid: %w", err)
+	if err := ValidateRootHash(rootHash); err != nil {
+		return "", fmt.Errorf("root hash is invalid: %w", err)
 	}
 
-	return info, nil
+	return rootHash, nil
 }
