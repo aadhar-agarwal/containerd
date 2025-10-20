@@ -121,6 +121,45 @@ func TestDMVerity(t *testing.T) {
 		assert.NoError(t, err)
 	})
 
+	t.Run("Open_WithRootHashFile", func(t *testing.T) {
+		// Create a root hash file
+		rootHashFile, err := os.CreateTemp(tempDir, "root-hash-open-*.txt")
+		assert.NoError(t, err)
+		rootHashFilePath := rootHashFile.Name()
+
+		// Write the root hash to the file
+		_, err = rootHashFile.WriteString(rootHash)
+		assert.NoError(t, err)
+		rootHashFile.Close()
+		defer os.Remove(rootHashFilePath)
+
+		// Create a new loopback device for this test
+		_, loopDevice4 := createLoopbackDevice(t, tempDir, "1Mb")
+		defer func() {
+			assert.NoError(t, mount.DetachLoopDevice(loopDevice4))
+		}()
+
+		// Format the device first
+		optsFormat := opts
+		_, err = Format(loopDevice4, loopDevice4, &optsFormat)
+		assert.NoError(t, err)
+
+		// Open with root hash file instead of command-line arg
+		optsOpen := opts
+		optsOpen.RootHashFile = rootHashFilePath
+		deviceName := "test-verity-roothashfile"
+		_, err = Open(loopDevice4, deviceName, loopDevice4, "", &optsOpen)
+		assert.NoError(t, err)
+
+		// Verify device was created
+		_, err = os.Stat("/dev/mapper/" + deviceName)
+		assert.NoError(t, err)
+
+		// Clean up
+		_, err = Close(deviceName)
+		assert.NoError(t, err)
+	})
+
 	t.Run("Close", func(t *testing.T) {
 		_, err := Close(testDeviceName)
 		assert.NoError(t, err)
