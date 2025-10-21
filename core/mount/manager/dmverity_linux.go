@@ -97,6 +97,18 @@ func (dmverityTransformer) Transform(ctx context.Context, m mount.Mount, a []mou
 		deviceName = fmt.Sprintf("dmverity-%d", time.Now().UnixNano())
 	}
 
+	// Update mount to point to the dm-verity device
+	devicePath := fmt.Sprintf("/dev/mapper/%s", deviceName)
+
+	// Check if device already exists (for layer reuse)
+	if _, err := os.Stat(devicePath); err == nil {
+		log.G(ctx).WithField("device", devicePath).Debug("dm-verity device already exists, reusing")
+		// Device exists, just reuse it
+		m.Source = devicePath
+		m.Options = append(options, fmt.Sprintf("X-containerd.dmverity.device-name=%s", deviceName))
+		return m, nil
+	}
+
 	// Prepare dm-verity options
 	opts := dmverity.DefaultDmverityOptions()
 	if hashOffset > 0 {
@@ -117,9 +129,6 @@ func (dmverityTransformer) Transform(ctx context.Context, m mount.Mount, a []mou
 	if err != nil {
 		return mount.Mount{}, fmt.Errorf("failed to open dm-verity device: %w", err)
 	}
-
-	// Update mount to point to the dm-verity device
-	devicePath := fmt.Sprintf("/dev/mapper/%s", deviceName)
 
 	// Wait for device to appear
 	for i := 0; i < 100; i++ {

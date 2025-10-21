@@ -122,6 +122,12 @@ func checkDmveritySupport() error {
 	return nil
 }
 
+// isLayerWithDmverity checks if a layer has dm-verity metadata
+func (s *snapshotter) isLayerWithDmverity(id string) bool {
+	_, err := os.Stat(s.rootHashPath(id))
+	return err == nil
+}
+
 // formatDmverityLayer formats a committed EROFS layer with dm-verity hash tree
 func (s *snapshotter) formatDmverityLayer(ctx context.Context, id string) error {
 	// Skip if already formatted

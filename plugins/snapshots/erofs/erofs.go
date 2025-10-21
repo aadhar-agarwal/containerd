@@ -208,12 +208,6 @@ func (s *snapshotter) rootHashPath(id string) string {
 	return filepath.Join(s.root, "snapshots", id, ".roothash")
 }
 
-// isLayerWithDmverity checks if a layer has dm-verity metadata
-func (s *snapshotter) isLayerWithDmverity(id string) bool {
-	_, err := os.Stat(s.rootHashPath(id))
-	return err == nil
-}
-
 func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, kind snapshots.Kind) (string, error) {
 	td, err := os.MkdirTemp(snapshotDir, "new-")
 	if err != nil {
@@ -244,12 +238,24 @@ func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 // Otherwise, it returns a standard erofs mount with loop option.
 func (s *snapshotter) createErofsMount(id string, layerBlob string) mount.Mount {
 	if s.enableDmverity {
+		// Get file size to calculate hash offset
+		// The hash tree is stored after the original data at offset=fileSize
+		fileInfo, err := os.Stat(layerBlob)
+		var hashOffset uint64
+		if err == nil {
+			// During format, we truncate to 2x size and store hash tree at fileSize/2
+			hashOffset = uint64(fileInfo.Size() / 2)
+		}
+
 		return mount.Mount{
 			Source: layerBlob,
 			Type:   "dmverity/erofs",
 			Options: []string{
 				"ro",
 				fmt.Sprintf("X-containerd.dmverity.roothash-file=%s", s.rootHashPath(id)),
+				fmt.Sprintf("X-containerd.dmverity.hash-offset=%d", hashOffset),
+				// Use deterministic device name based on layer ID for reuse across containers
+				fmt.Sprintf("X-containerd.dmverity.device-name=containerd-erofs-%s", id),
 			},
 		}
 	}
