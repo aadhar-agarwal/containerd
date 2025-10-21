@@ -44,10 +44,11 @@ func (dmverityTransformer) Transform(ctx context.Context, m mount.Mount, a []mou
 	log.G(ctx).Debugf("transforming dmverity mount: %+v", m)
 
 	var (
-		rootHashFile string
-		rootHash     string
-		hashOffset   uint64
-		deviceName   string
+		rootHashFile  string
+		rootHash      string
+		hashOffset    uint64
+		deviceName    string
+		useSuperblock bool = true // default value from DefaultDmverityOptions
 	)
 
 	// Parse dm-verity options from mount options
@@ -70,6 +71,16 @@ func (dmverityTransformer) Transform(ctx context.Context, m mount.Mount, a []mou
 				}
 			case "device-name":
 				deviceName = value
+			case "use-superblock":
+				// Parse boolean value for use-superblock option
+				switch strings.ToLower(value) {
+				case "true":
+					useSuperblock = true
+				case "false":
+					useSuperblock = false
+				default:
+					return mount.Mount{}, fmt.Errorf("invalid use-superblock value %q: must be true or false: %w", value, errdefs.ErrInvalidArgument)
+				}
 			default:
 				return mount.Mount{}, fmt.Errorf("unknown dmverity option %q: %w", key, errdefs.ErrInvalidArgument)
 			}
@@ -81,15 +92,6 @@ func (dmverityTransformer) Transform(ctx context.Context, m mount.Mount, a []mou
 	// Validate required options
 	if rootHashFile == "" && rootHash == "" {
 		return mount.Mount{}, fmt.Errorf("dmverity requires either roothash-file or roothash option: %w", errdefs.ErrInvalidArgument)
-	}
-
-	// Read root hash from file if specified
-	if rootHashFile != "" {
-		hashBytes, err := os.ReadFile(rootHashFile)
-		if err != nil {
-			return mount.Mount{}, fmt.Errorf("failed to read root hash file %q: %w", rootHashFile, err)
-		}
-		rootHash = strings.TrimSpace(string(hashBytes))
 	}
 
 	// Generate device name if not specified
@@ -117,12 +119,15 @@ func (dmverityTransformer) Transform(ctx context.Context, m mount.Mount, a []mou
 	if rootHashFile != "" {
 		opts.RootHashFile = rootHashFile
 	}
+	// Only set if different from default value (true)
+	if useSuperblock != true {
+		opts.UseSuperblock = useSuperblock
+	}
 
 	// Create dm-verity device
 	log.G(ctx).WithFields(log.Fields{
 		"source":      m.Source,
 		"device-name": deviceName,
-		"root-hash":   rootHash[:16] + "...", // Log only first few chars for security
 	}).Debug("opening dm-verity device")
 
 	_, err := dmverity.Open(m.Source, deviceName, m.Source, rootHash, &opts)
