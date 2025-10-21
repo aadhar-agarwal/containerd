@@ -151,9 +151,12 @@ func (s *snapshotter) formatDmverityLayer(ctx context.Context, id string) error 
 
 	fileSize := fileinfo.Size()
 
+	// Get default dm-verity options to determine block size
+	opts := dmverity.DefaultDmverityOptions()
+
 	// Calculate data blocks and hash offset aligned to block boundaries
 	// dm-verity requires the hash area to start at a block-aligned offset
-	const blockSize = 4096
+	blockSize := int64(opts.DataBlockSize)
 	dataBlocks := (fileSize + blockSize - 1) / blockSize
 	hashOffset := dataBlocks * blockSize
 
@@ -165,7 +168,6 @@ func (s *snapshotter) formatDmverityLayer(ctx context.Context, id string) error 
 		return fmt.Errorf("failed to truncate layer blob: %w", err)
 	}
 
-	opts := dmverity.DefaultDmverityOptions()
 	opts.DataBlocks = uint64(dataBlocks)
 	opts.HashOffset = uint64(hashOffset)
 	opts.RootHashFile = s.rootHashPath(id)

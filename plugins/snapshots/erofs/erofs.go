@@ -30,6 +30,7 @@ import (
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
 	"github.com/containerd/containerd/v2/core/snapshots/storage"
+	"github.com/containerd/containerd/v2/internal/dmverity"
 	"github.com/containerd/containerd/v2/internal/fsverity"
 )
 
@@ -244,13 +245,16 @@ func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 func (s *snapshotter) createErofsMount(id string, layerBlob string) mount.Mount {
 	if s.enableDmverity {
 		// Get file size to calculate hash offset
-		// The hash tree is stored after the original data, aligned to 4096-byte blocks
+		// The hash tree is stored after the original data, aligned to block boundaries
 		fileInfo, err := os.Stat(layerBlob)
 		var hashOffset uint64
 		if err == nil {
+			// Get the block size from dm-verity default options
+			// Use the same block size as formatDmverityLayer
+			opts := dmverity.DefaultDmverityOptions()
+			blockSize := int64(opts.DataBlockSize)
+
 			// During format, we align the hash offset to block boundaries
-			// Use the same alignment calculation as formatDmverityLayer
-			const blockSize = 4096
 			originalSize := fileInfo.Size() / 2 // File was truncated to 2x size during format
 			hashOffset = uint64((originalSize + blockSize - 1) / blockSize * blockSize)
 		}
