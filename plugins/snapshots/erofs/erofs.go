@@ -208,6 +208,11 @@ func (s *snapshotter) rootHashPath(id string) string {
 	return filepath.Join(s.root, "snapshots", id, ".roothash")
 }
 
+// dmverityDeviceName returns the dm-verity device name for a snapshot ID
+func (s *snapshotter) dmverityDeviceName(id string) string {
+	return fmt.Sprintf("containerd-erofs-%s", id)
+}
+
 func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, kind snapshots.Kind) (string, error) {
 	td, err := os.MkdirTemp(snapshotDir, "new-")
 	if err != nil {
@@ -255,7 +260,7 @@ func (s *snapshotter) createErofsMount(id string, layerBlob string) mount.Mount 
 				fmt.Sprintf("X-containerd.dmverity.roothash-file=%s", s.rootHashPath(id)),
 				fmt.Sprintf("X-containerd.dmverity.hash-offset=%d", hashOffset),
 				// Use deterministic device name based on layer ID for reuse across containers
-				fmt.Sprintf("X-containerd.dmverity.device-name=containerd-erofs-%s", id),
+				fmt.Sprintf("X-containerd.dmverity.device-name=%s", s.dmverityDeviceName(id)),
 			},
 		}
 	}
