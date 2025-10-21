@@ -150,15 +150,24 @@ func (s *snapshotter) formatDmverityLayer(ctx context.Context, id string) error 
 	defer f.Close()
 
 	fileSize := fileinfo.Size()
-	// Truncate the file to double its size to provide space for the dm-verity hash tree.
+
+	// Calculate data blocks and hash offset aligned to block boundaries
+	// dm-verity requires the hash area to start at a block-aligned offset
+	const blockSize = 4096
+	dataBlocks := (fileSize + blockSize - 1) / blockSize
+	hashOffset := dataBlocks * blockSize
+
+	// Truncate the file to provide space for the dm-verity hash tree.
 	// The hash tree will never exceed the original data size.
 	// Most filesystems use sparse allocation, so unused space doesn't consume disk.
-	if err := f.Truncate(fileSize * 2); err != nil {
+	newSize := hashOffset * 2
+	if err := f.Truncate(newSize); err != nil {
 		return fmt.Errorf("failed to truncate layer blob: %w", err)
 	}
 
 	opts := dmverity.DefaultDmverityOptions()
-	opts.HashOffset = uint64(fileSize)
+	opts.DataBlocks = uint64(dataBlocks)
+	opts.HashOffset = uint64(hashOffset)
 	opts.RootHashFile = s.rootHashPath(id)
 
 	_, err = dmverity.Format(layerBlob, layerBlob, &opts)

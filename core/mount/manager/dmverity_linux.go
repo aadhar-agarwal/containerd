@@ -107,7 +107,7 @@ func (dmverityTransformer) Transform(ctx context.Context, m mount.Mount, a []mou
 		log.G(ctx).WithField("device", devicePath).Debug("dm-verity device already exists, reusing")
 		// Device exists, just reuse it
 		m.Source = devicePath
-		m.Options = append(options, fmt.Sprintf("X-containerd.dmverity.device-name=%s", deviceName))
+		m.Options = options
 		return m, nil
 	}
 

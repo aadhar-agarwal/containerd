@@ -21,6 +21,7 @@ package manager
 import (
 	"context"
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
@@ -36,17 +37,27 @@ type dmverityHandler struct{}
 
 // Mount handles mounting with dm-verity device tracking
 func (h dmverityHandler) Mount(ctx context.Context, m mount.Mount, target string, active []mount.ActiveMount) (mount.ActiveMount, error) {
-	// Extract the device name from mount options
+	// Extract the device name from mount options and filter it out
 	deviceName := ""
+	var filteredOptions []string
 	for _, opt := range m.Options {
 		if strings.HasPrefix(opt, "X-containerd.dmverity.device-name=") {
 			deviceName = strings.TrimPrefix(opt, "X-containerd.dmverity.device-name=")
-			break
+		} else {
+			filteredOptions = append(filteredOptions, opt)
 		}
 	}
 
 	if deviceName == "" {
 		return mount.ActiveMount{}, fmt.Errorf("dm-verity device name not found in mount options")
+	}
+
+	// Update mount options to exclude the device-name
+	m.Options = filteredOptions
+
+	// Create the target directory if it doesn't exist
+	if err := os.MkdirAll(target, 0755); err != nil {
+		return mount.ActiveMount{}, fmt.Errorf("failed to create mount target: %w", err)
 	}
 
 	// Perform the mount

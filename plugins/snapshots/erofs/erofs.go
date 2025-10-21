@@ -244,12 +244,15 @@ func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 func (s *snapshotter) createErofsMount(id string, layerBlob string) mount.Mount {
 	if s.enableDmverity {
 		// Get file size to calculate hash offset
-		// The hash tree is stored after the original data at offset=fileSize
+		// The hash tree is stored after the original data, aligned to 4096-byte blocks
 		fileInfo, err := os.Stat(layerBlob)
 		var hashOffset uint64
 		if err == nil {
-			// During format, we truncate to 2x size and store hash tree at fileSize/2
-			hashOffset = uint64(fileInfo.Size() / 2)
+			// During format, we align the hash offset to block boundaries
+			// Use the same alignment calculation as formatDmverityLayer
+			const blockSize = 4096
+			originalSize := fileInfo.Size() / 2 // File was truncated to 2x size during format
+			hashOffset = uint64((originalSize + blockSize - 1) / blockSize * blockSize)
 		}
 
 		return mount.Mount{
