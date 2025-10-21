@@ -66,23 +66,24 @@ func (h dmverityHandler) Mount(ctx context.Context, m mount.Mount, target string
 	}, nil
 }
 
-// Unmount unmounts the filesystem and closes the dm-verity device
+// Unmount is not used for dm-verity mounts because the manager's Deactivate()
+// calls unmountDmverity() directly when it detects the "dmverity-device" key in MountData.
+// This method is required by the mount.Handler interface but remains unimplemented
+// as the standard Unmount signature doesn't provide access to the MountData needed
+// to retrieve the device name for cleanup.
 func (h dmverityHandler) Unmount(ctx context.Context, target string) error {
-	// Note: We need access to the MountData to get the device name
-	// This is a design limitation - the Unmount interface doesn't provide access to ActiveMount
-	// For now, we'll just unmount the filesystem and log that manual cleanup may be needed
-
-	if err := mount.Unmount(target, 0); err != nil {
-		log.G(ctx).WithError(err).WithField("target", target).Warn("failed to unmount dm-verity filesystem")
-		return err
-	}
-
-	log.G(ctx).WithField("target", target).Debug("unmounted dm-verity filesystem (device cleanup handled by GC)")
-	return nil
+	// This should never be called for dm-verity mounts due to the check in
+	// manager.Deactivate() that prioritizes MountData["dmverity-device"] checks
+	log.G(ctx).WithField("target", target).Warn("dmverityHandler.Unmount called unexpectedly, device may leak")
+	return mount.Unmount(target, 0)
 }
 
-// UnmountWithData unmounts and cleans up the dm-verity device
-// This should be called from the manager's Deactivate with access to MountData
+// unmountDmverity unmounts the filesystem and closes the dm-verity device.
+// This function is called directly by the manager's Deactivate() instead of going
+// through the Unmount() interface method because it requires access to the full
+// ActiveMount struct to retrieve the device name from MountData. The standard
+// Handler.Unmount() interface only provides the mount point path, which is
+// insufficient to determine which dm-verity device to close.
 func unmountDmverity(ctx context.Context, active mount.ActiveMount) error {
 	// First unmount the filesystem
 	if err := mount.Unmount(active.MountPoint, 0); err != nil {
