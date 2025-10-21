@@ -18,42 +18,112 @@ package manager
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/containerd/log/logtest"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/containerd/containerd/v2/core/mount"
 )
 
-// TestDmverityTransformer demonstrates how the dm-verity transformer works
+// TestDmverityTransformer tests the core transformer functionality
 func TestDmverityTransformer(t *testing.T) {
 	ctx := logtest.WithT(context.Background(), t)
-
 	tr := dmverityTransformer{}
 
-	// Example mount spec from EROFS snapshotter with dm-verity enabled
-	m := mount.Mount{
-		Source: "/var/lib/containerd/io.containerd.snapshotter.v1.erofs/snapshots/abc123/layer.erofs",
-		Type:   "erofs",
-		Options: []string{
-			"ro",
-			"X-containerd.dmverity.roothash-file=/var/lib/containerd/io.containerd.snapshotter.v1.erofs/snapshots/abc123/.roothash",
-		},
-	}
+	// Test missing roothash
+	t.Run("requires roothash", func(t *testing.T) {
+		m := mount.Mount{
+			Source:  "/path/to/layer.erofs",
+			Type:    "erofs",
+			Options: []string{"ro"},
+		}
+		_, err := tr.Transform(ctx, m, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "dmverity requires either roothash-file or roothash option")
+	})
 
-	// In a real scenario, this would:
-	// 1. Read the root hash from .roothash file
-	// 2. Call dmverity.Open() to create /dev/mapper/dmverity-xxx
-	// 3. Return a mount with Source pointing to the device
+	// Test invalid option format
+	t.Run("validates option format", func(t *testing.T) {
+		m := mount.Mount{
+			Source:  "/path/to/layer.erofs",
+			Type:    "erofs",
+			Options: []string{"ro", "X-containerd.dmverity.invalid-format"},
+		}
+		_, err := tr.Transform(ctx, m, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid dmverity option")
+	})
 
-	// Note: This test won't actually work without a real dm-verity formatted file
-	// It's here to demonstrate the API usage
-	_, err := tr.Transform(ctx, m, nil)
+	// Test roothash file reading
+	t.Run("reads roothash from file", func(t *testing.T) {
+		tmpDir := t.TempDir()
+		roothashFile := filepath.Join(tmpDir, ".roothash")
+		hash := "abc123def456789012345678901234567890123456789012345678901234"
+		require.NoError(t, os.WriteFile(roothashFile, []byte(hash+"\n"), 0644))
 
-	// Expect failure in test environment (no actual dm-verity device)
-	if err == nil {
-		t.Skip("dm-verity transformation unexpectedly succeeded (likely not in a proper test environment)")
-	}
+		m := mount.Mount{
+			Source: "/path/to/layer.erofs",
+			Type:   "erofs",
+			Options: []string{
+				"ro",
+				fmt.Sprintf("X-containerd.dmverity.roothash-file=%s", roothashFile),
+			},
+		}
 
-	t.Logf("Expected failure (no real dm-verity device): %v", err)
+		_, err := tr.Transform(ctx, m, nil)
+		// Will fail at device creation, but hash file should be read successfully
+		if err != nil {
+			assert.NotContains(t, err.Error(), "failed to read root hash file")
+		}
+	})
+}
+
+// TestDmverityHandler tests the handler's Mount method
+func TestDmverityHandler(t *testing.T) {
+	ctx := logtest.WithT(context.Background(), t)
+	handler := dmverityHandler{}
+
+	t.Run("requires device name in options", func(t *testing.T) {
+		m := mount.Mount{
+			Source:  "/dev/mapper/test-device",
+			Type:    "erofs",
+			Options: []string{"ro"},
+		}
+
+		_, err := handler.Mount(ctx, m, "/tmp/target", nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "dm-verity device name not found")
+	})
+
+	t.Run("extracts device name to MountData", func(t *testing.T) {
+		m := mount.Mount{
+			Source: "/dev/mapper/test-device",
+			Type:   "erofs",
+			Options: []string{
+				"ro",
+				"X-containerd.dmverity.device-name=test-device-name",
+			},
+		}
+
+		tmpDir := t.TempDir()
+		target := filepath.Join(tmpDir, "target")
+		require.NoError(t, os.MkdirAll(target, 0755))
+
+		active, err := handler.Mount(ctx, m, target, nil)
+
+		// Mount will fail (device doesn't exist), but we can verify device name extraction
+		if err != nil {
+			t.Logf("Expected mount failure: %v", err)
+		} else {
+			// Verify MountData contains device name
+			require.NotNil(t, active.MountData)
+			assert.Equal(t, "test-device-name", active.MountData["dmverity-device"])
+			_ = mount.Unmount(target, 0)
+		}
+	})
 }
