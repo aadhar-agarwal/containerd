@@ -21,6 +21,8 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"path/filepath"
+	"syscall"
 
 	"github.com/containerd/continuity/fs"
 	"github.com/containerd/log"
@@ -83,28 +85,49 @@ func setImmutable(path string, enable bool) error {
 
 func cleanupUpper(upper string) error {
 	if err := mount.UnmountAll(upper, 0); err != nil {
-		return fmt.Errorf("failed to unmount EROFS upper path: %w", err)
+		return fmt.Errorf("failed to unmount EROFS mount on %v: %w", upper, err)
 	}
 	return nil
 }
 
-func convertDirToErofs(ctx context.Context, dest string, src string) error {
-	if _, err := os.Stat(dest); err == nil {
-		log.G(ctx).WithField("dest", dest).Warn("Skipping erofs conversion, already exists")
-		return nil
+func convertDirToErofs(ctx context.Context, layerBlob, upperDir string) error {
+	err := erofsutils.ConvertErofs(ctx, layerBlob, upperDir, nil)
+	if err != nil {
+		return err
 	}
-	return erofsutils.ConvertErofs(ctx, dest, src, nil)
+
+	// Remove all sub-directories in the overlayfs upperdir.  Leave the
+	// overlayfs upperdir itself since it's used for Lchown.
+	fd, err := os.Open(upperDir)
+	if err != nil {
+		return err
+	}
+	defer fd.Close()
+
+	dirs, err := fd.Readdirnames(0)
+	if err != nil {
+		return err
+	}
+
+	for _, d := range dirs {
+		dir := filepath.Join(upperDir, d)
+		if err := os.RemoveAll(dir); err != nil {
+			log.G(ctx).WithError(err).WithField("path", dir).Warn("failed to remove directory")
+		}
+	}
+	return nil
 }
 
-func upperDirectoryPermission(child string, parent string) error {
-	childStat, err := os.Stat(child)
+func upperDirectoryPermission(p, parent string) error {
+	st, err := os.Stat(parent)
 	if err != nil {
-		return err
-	}
-	parentStat, err := os.Stat(parent)
-	if err != nil {
-		return err
+		return fmt.Errorf("failed to stat parent: %w", err)
 	}
 
-	return os.Chmod(child, parentStat.Mode().Perm()&childStat.Mode().Perm())
+	stat := st.Sys().(*syscall.Stat_t)
+	if err := os.Lchown(p, int(stat.Uid), int(stat.Gid)); err != nil {
+		return fmt.Errorf("failed to chown: %w", err)
+	}
+
+	return nil
 }
