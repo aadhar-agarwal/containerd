@@ -240,35 +240,41 @@ func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 }
 
 // createErofsMount creates a mount specification for an EROFS layer.
-// If dm-verity is enabled, it returns a dmverity/erofs mount type with root hash file option.
+// If dm-verity is enabled, it returns a dmverity/erofs mount type.
 // Otherwise, it returns a standard erofs mount with loop option.
 func (s *snapshotter) createErofsMount(id string, layerBlob string) (mount.Mount, error) {
 	if s.enableDmverity {
-		// Check if layer has dm-verity metadata
-		metadataPath := layerBlob + ".metadata"
-		if _, err := os.Stat(metadataPath); err != nil {
-			// When dm-verity is enabled, all layers MUST be formatted with dm-verity
-			return mount.Mount{}, fmt.Errorf("dm-verity enabled but layer metadata not found at %q: %w", metadataPath, err)
-		}
-
-		// Use metadata to create mount options with correct parameters
-		// The metadata file contains all dm-verity parameters (block sizes, hash offset, root hash file, etc.)
-		return mount.Mount{
-			Source: layerBlob,
-			Type:   "dmverity/erofs",
-			Options: []string{
-				"ro",
-				// Pass metadata file path so mount transformer can load all dm-verity parameters
-				fmt.Sprintf("X-containerd.dmverity.metadata-file=%s", metadataPath),
-				// Use deterministic device name based on layer ID for reuse across containers
-				fmt.Sprintf("X-containerd.dmverity.device-name=%s", s.dmverityDeviceName(id)),
-			},
-		}, nil
+		return s.createDmverityErofsMount(id, layerBlob)
 	}
 	return mount.Mount{
 		Source:  layerBlob,
 		Type:    "erofs",
 		Options: []string{"ro", "loop"},
+	}, nil
+}
+
+// createDmverityErofsMount creates a mount specification for an EROFS layer with dm-verity integrity verification.
+// It requires the layer to have associated .metadata file containing dm-verity parameters.
+func (s *snapshotter) createDmverityErofsMount(id string, layerBlob string) (mount.Mount, error) {
+	// Check if layer has dm-verity metadata
+	metadataPath := layerBlob + ".metadata"
+	if _, err := os.Stat(metadataPath); err != nil {
+		// When dm-verity is enabled, all layers MUST be formatted with dm-verity
+		return mount.Mount{}, fmt.Errorf("dm-verity enabled but layer metadata not found at %q: %w", metadataPath, err)
+	}
+
+	// The metadata file contains all dm-verity parameters (block sizes, hash offset, root hash file, etc.)
+	// that will be loaded by the mount transformer to create the dm-verity device.
+	return mount.Mount{
+		Source: layerBlob,
+		Type:   "dmverity/erofs",
+		Options: []string{
+			"ro",
+			// Pass metadata file path so mount transformer can load all dm-verity parameters
+			fmt.Sprintf("X-containerd.dmverity.metadata-file=%s", metadataPath),
+			// Use deterministic device name based on layer ID for reuse across containers
+			fmt.Sprintf("X-containerd.dmverity.device-name=%s", s.dmverityDeviceName(id)),
+		},
 	}, nil
 }
 
