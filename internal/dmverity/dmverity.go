@@ -21,6 +21,7 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -43,27 +44,29 @@ const (
 // DmverityOptions contains configuration options for dm-verity operations
 type DmverityOptions struct {
 	// Salt for hashing, represented as a hex string
-	Salt string
+	Salt string `json:"salt,omitempty"`
 	// Hash algorithm to use (default: sha256)
-	HashAlgorithm string
+	HashAlgorithm string `json:"hash_algorithm,omitempty"`
 	// Size of data blocks in bytes (default: 4096)
-	DataBlockSize uint32
+	DataBlockSize uint32 `json:"data_block_size,omitempty"`
 	// Size of hash blocks in bytes (default: 4096)
-	HashBlockSize uint32
+	HashBlockSize uint32 `json:"hash_block_size,omitempty"`
 	// Number of data blocks
-	DataBlocks uint64
+	DataBlocks uint64 `json:"data_blocks,omitempty"`
 	// Offset of hash area in bytes
-	HashOffset uint64
+	HashOffset uint64 `json:"hash_offset,omitempty"`
 	// Hash type (default: 1)
-	HashType uint32
+	HashType uint32 `json:"hash_type,omitempty"`
 	// Superblock usage flag (false meaning --no-superblock)
-	UseSuperblock bool
+	UseSuperblock bool `json:"use_superblock,omitempty"`
 	// Debug flag
-	Debug bool
+	Debug bool `json:"debug,omitempty"`
 	// UUID for device to use
-	UUID string
+	UUID string `json:"uuid,omitempty"`
 	// RootHashFile specifies a file path where the root hash should be saved
-	RootHashFile string
+	RootHashFile string `json:"root_hash_file,omitempty"`
+	// RootHash stores the root hash value (for metadata persistence)
+	RootHash string `json:"root_hash,omitempty"`
 }
 
 // DefaultDmverityOptions returns a DmverityOptions struct with default values
@@ -76,6 +79,33 @@ func DefaultDmverityOptions() DmverityOptions {
 		HashType:      1,
 		UseSuperblock: true,
 	}
+}
+
+// SaveMetadata saves DmverityOptions as JSON metadata file.
+// This allows all components (differ, snapshotter, mount manager) to share
+// the same dm-verity parameters used during formatting.
+func SaveMetadata(path string, opts *DmverityOptions) error {
+	data, err := json.MarshalIndent(opts, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal dm-verity options: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0644); err != nil {
+		return fmt.Errorf("failed to write dm-verity metadata file: %w", err)
+	}
+	return nil
+}
+
+// LoadMetadata loads DmverityOptions from a JSON metadata file
+func LoadMetadata(path string) (*DmverityOptions, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read dm-verity metadata file: %w", err)
+	}
+	var opts DmverityOptions
+	if err := json.Unmarshal(data, &opts); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal dm-verity metadata: %w", err)
+	}
+	return &opts, nil
 }
 
 // ValidateOptions validates dm-verity options to ensure they are valid
