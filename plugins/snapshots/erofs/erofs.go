@@ -209,11 +209,6 @@ func (s *snapshotter) lowerPath(id string) (string, error) {
 	return layerBlob, nil
 }
 
-// rootHashPath returns the path to the root hash file for a given snapshot ID
-func (s *snapshotter) rootHashPath(id string) string {
-	return filepath.Join(s.root, "snapshots", id, ".roothash")
-}
-
 // dmverityDeviceName returns the dm-verity device name for a snapshot ID
 func (s *snapshotter) dmverityDeviceName(id string) string {
 	return fmt.Sprintf("containerd-erofs-%s", id)
