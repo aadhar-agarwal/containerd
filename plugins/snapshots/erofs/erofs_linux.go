@@ -28,7 +28,6 @@ import (
 	"golang.org/x/sys/unix"
 
 	"github.com/containerd/containerd/v2/core/mount"
-	"github.com/containerd/containerd/v2/internal/dmverity"
 	"github.com/containerd/containerd/v2/internal/erofsutils"
 )
 
@@ -108,75 +107,4 @@ func upperDirectoryPermission(child string, parent string) error {
 	}
 
 	return os.Chmod(child, parentStat.Mode().Perm()&childStat.Mode().Perm())
-}
-
-// checkDmveritySupport checks if dm-verity is supported on this system
-func checkDmveritySupport() error {
-	supported, err := dmverity.IsSupported()
-	if err != nil {
-		return fmt.Errorf("failed to check dmverity support: %w", err)
-	}
-	if !supported {
-		return fmt.Errorf("dmverity is not supported on this system")
-	}
-	return nil
-}
-
-// isLayerWithDmverity checks if a layer has dm-verity metadata
-func (s *snapshotter) isLayerWithDmverity(id string) bool {
-	_, err := os.Stat(s.rootHashPath(id))
-	return err == nil
-}
-
-// formatDmverityLayer formats a committed EROFS layer with dm-verity hash tree
-func (s *snapshotter) formatDmverityLayer(ctx context.Context, id string) error {
-	// Skip if already formatted
-	if s.isLayerWithDmverity(id) {
-		log.G(ctx).WithField("id", id).Debug("Layer already has dm-verity, skipping format")
-		return nil
-	}
-
-	layerBlob := s.layerBlobPath(id)
-	fileinfo, err := os.Stat(layerBlob)
-	if err != nil {
-		return fmt.Errorf("failed to stat layer blob: %w", err)
-	}
-
-	// Open file for truncating
-	f, err := os.OpenFile(layerBlob, os.O_RDWR, 0644)
-	if err != nil {
-		return fmt.Errorf("failed to open layer blob for truncating: %w", err)
-	}
-	defer f.Close()
-
-	fileSize := fileinfo.Size()
-
-	// Get default dm-verity options to determine block size
-	opts := dmverity.DefaultDmverityOptions()
-
-	// Calculate data blocks and hash offset aligned to block boundaries
-	// dm-verity requires the hash area to start at a block-aligned offset
-	blockSize := int64(opts.DataBlockSize)
-	dataBlocks := (fileSize + blockSize - 1) / blockSize
-	hashOffset := dataBlocks * blockSize
-
-	// Truncate the file to provide space for the dm-verity hash tree.
-	// The hash tree will never exceed the original data size.
-	// Most filesystems use sparse allocation, so unused space doesn't consume disk.
-	newSize := hashOffset * 2
-	if err := f.Truncate(newSize); err != nil {
-		return fmt.Errorf("failed to truncate layer blob: %w", err)
-	}
-
-	opts.DataBlocks = uint64(dataBlocks)
-	opts.HashOffset = uint64(hashOffset)
-	opts.RootHashFile = s.rootHashPath(id)
-
-	_, err = dmverity.Format(layerBlob, layerBlob, &opts)
-	if err != nil {
-		return fmt.Errorf("failed to format dmverity: %w", err)
-	}
-
-	log.G(ctx).WithField("id", id).WithField("size", fileSize).Info("Successfully formatted dm-verity layer")
-	return nil
 }

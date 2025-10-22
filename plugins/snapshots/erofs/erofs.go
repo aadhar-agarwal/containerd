@@ -26,6 +26,7 @@ import (
 	"github.com/containerd/continuity/fs"
 	"github.com/containerd/errdefs"
 	"github.com/containerd/log"
+	"github.com/containerd/plugin"
 
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
@@ -131,8 +132,12 @@ func NewSnapshotter(root string, opts ...Opt) (snapshots.Snapshotter, error) {
 	}
 
 	if config.enableDmverity {
-		if err := checkDmveritySupport(); err != nil {
-			return nil, err
+		supported, err := dmverity.IsSupported()
+		if err != nil {
+			return nil, fmt.Errorf("dm-verity support check failed: %w", err)
+		}
+		if !supported {
+			return nil, fmt.Errorf("dm-verity is not supported on this system (veritysetup not available or dm_verity module not loaded): %w", plugin.ErrSkipPlugin)
 		}
 	}
 
@@ -242,40 +247,34 @@ func (s *snapshotter) prepareDirectory(ctx context.Context, snapshotDir string, 
 // createErofsMount creates a mount specification for an EROFS layer.
 // If dm-verity is enabled, it returns a dmverity/erofs mount type with root hash file option.
 // Otherwise, it returns a standard erofs mount with loop option.
-func (s *snapshotter) createErofsMount(id string, layerBlob string) mount.Mount {
+func (s *snapshotter) createErofsMount(id string, layerBlob string) (mount.Mount, error) {
 	if s.enableDmverity {
-		// Get file size to calculate hash offset
-		// The hash tree is stored after the original data, aligned to block boundaries
-		fileInfo, err := os.Stat(layerBlob)
-		var hashOffset uint64
-		if err == nil {
-			// Get the block size from dm-verity default options
-			// Use the same block size as formatDmverityLayer
-			opts := dmverity.DefaultDmverityOptions()
-			blockSize := int64(opts.DataBlockSize)
-
-			// During format, we align the hash offset to block boundaries
-			originalSize := fileInfo.Size() / 2 // File was truncated to 2x size during format
-			hashOffset = uint64((originalSize + blockSize - 1) / blockSize * blockSize)
+		// Check if layer has dm-verity metadata
+		metadataPath := layerBlob + ".metadata"
+		if _, err := os.Stat(metadataPath); err != nil {
+			// When dm-verity is enabled, all layers MUST be formatted with dm-verity
+			return mount.Mount{}, fmt.Errorf("dm-verity enabled but layer metadata not found at %q: %w", metadataPath, err)
 		}
 
+		// Use metadata to create mount options with correct parameters
+		// The metadata file contains all dm-verity parameters (block sizes, hash offset, root hash file, etc.)
 		return mount.Mount{
 			Source: layerBlob,
 			Type:   "dmverity/erofs",
 			Options: []string{
 				"ro",
-				fmt.Sprintf("X-containerd.dmverity.roothash-file=%s", s.rootHashPath(id)),
-				fmt.Sprintf("X-containerd.dmverity.hash-offset=%d", hashOffset),
+				// Pass metadata file path so mount transformer can load all dm-verity parameters
+				fmt.Sprintf("X-containerd.dmverity.metadata-file=%s", metadataPath),
 				// Use deterministic device name based on layer ID for reuse across containers
 				fmt.Sprintf("X-containerd.dmverity.device-name=%s", s.dmverityDeviceName(id)),
 			},
-		}
+		}, nil
 	}
 	return mount.Mount{
 		Source:  layerBlob,
 		Type:    "erofs",
 		Options: []string{"ro", "loop"},
-	}
+	}, nil
 }
 
 func (s *snapshotter) mounts(snap storage.Snapshot, _ snapshots.Info) ([]mount.Mount, error) {
@@ -291,7 +290,11 @@ func (s *snapshotter) mounts(snap storage.Snapshot, _ snapshots.Info) ([]mount.M
 					return nil, err
 				}
 			}
-			return []mount.Mount{s.createErofsMount(snap.ID, layerBlob)}, nil
+			m, err := s.createErofsMount(snap.ID, layerBlob)
+			if err != nil {
+				return nil, fmt.Errorf("failed to create erofs mount: %w", err)
+			}
+			return []mount.Mount{m}, nil
 		}
 		// if we only have one layer/no parents then just return a bind mount as overlay
 		// will not work
@@ -369,7 +372,11 @@ func (s *snapshotter) mounts(snap storage.Snapshot, _ snapshots.Info) ([]mount.M
 		if err != nil {
 			return nil, err
 		}
-		return []mount.Mount{s.createErofsMount(snap.ParentIDs[0], layerBlob)}, nil
+		m, err := s.createErofsMount(snap.ParentIDs[0], layerBlob)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create erofs mount: %w", err)
+		}
+		return []mount.Mount{m}, nil
 	}
 
 	first := len(mounts)
@@ -379,7 +386,10 @@ func (s *snapshotter) mounts(snap storage.Snapshot, _ snapshots.Info) ([]mount.M
 			return nil, err
 		}
 
-		m := s.createErofsMount(snap.ParentIDs[i], layerBlob)
+		m, err := s.createErofsMount(snap.ParentIDs[i], layerBlob)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create erofs mount for parent %s: %w", snap.ParentIDs[i], err)
+		}
 
 		mounts = append(mounts, m)
 	}
@@ -546,12 +556,7 @@ func (s *snapshotter) Commit(ctx context.Context, name, key string, opts ...snap
 		}
 	}
 
-	// Format dm-verity layer if enabled
-	if s.enableDmverity {
-		if err := s.formatDmverityLayer(ctx, id); err != nil {
-			return fmt.Errorf("failed to format dmverity layer: %w", err)
-		}
-	}
+	// Note: dm-verity formatting is handled by the EROFS differ, not here
 
 	return s.ms.WithTransaction(ctx, true, func(ctx context.Context) error {
 		if _, err := os.Stat(layerBlob); err != nil {

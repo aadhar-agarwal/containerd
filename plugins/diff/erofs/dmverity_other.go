@@ -20,31 +20,10 @@ package erofs
 
 import (
 	"context"
-
-	"github.com/containerd/errdefs"
+	"fmt"
 )
 
-func checkCompatibility(root string) error {
-	return nil
-}
-
-func setImmutable(path string, enable bool) error {
-	return errdefs.ErrNotImplemented
-}
-
-func cleanupUpper(upper string) error {
-	return nil
-}
-
-func upperDirectoryPermission(_, _ string) error {
-	return errdefs.ErrNotImplemented
-}
-
-// checkDmveritySupport returns not implemented on non-Linux platforms
-func checkDmveritySupport() error {
-	return errdefs.ErrNotImplemented
-}
-
-func convertDirToErofs(ctx context.Context, layerBlob, upperDir string) error {
-	return errdefs.ErrNotImplemented
+// formatDmverityLayer returns not implemented on non-Linux platforms
+func (s *erofsDiff) formatDmverityLayer(_ context.Context, _ string) error {
+	return fmt.Errorf("dm-verity is only supported on Linux")
 }
