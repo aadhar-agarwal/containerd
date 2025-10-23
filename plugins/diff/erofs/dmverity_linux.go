@@ -50,6 +50,13 @@ func (s *erofsDiff) getDmverityOptions() dmverity.DmverityOptions {
 
 // formatDmverityLayer formats an EROFS layer with dm-verity hash tree
 func (s *erofsDiff) formatDmverityLayer(ctx context.Context, layerBlobPath string) error {
+	// Check if layer is already formatted by checking for metadata file
+	metadataPath := layerBlobPath + ".metadata"
+	if _, err := os.Stat(metadataPath); err == nil {
+		log.G(ctx).WithField("path", layerBlobPath).Debug("Layer already formatted with dm-verity, skipping")
+		return nil
+	}
+
 	// Get file info
 	fileinfo, err := os.Stat(layerBlobPath)
 	if err != nil {
@@ -105,7 +112,6 @@ func (s *erofsDiff) formatDmverityLayer(ctx context.Context, layerBlobPath strin
 	opts.RootHash = rootHash
 
 	// Save complete dm-verity options as metadata for use by snapshotter and mount manager
-	metadataPath := layerBlobPath + ".metadata"
 	if err := dmverity.SaveMetadata(metadataPath, &opts); err != nil {
 		return fmt.Errorf("failed to save metadata: %w", err)
 	}
