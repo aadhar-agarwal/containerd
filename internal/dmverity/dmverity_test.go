@@ -21,6 +21,7 @@ package dmverity
 import (
 	"bytes"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/containerd/containerd/v2/core/mount"
@@ -459,4 +460,44 @@ Root hash:              bef46122f85025cf37061b16c04e2a19960a5bbcdbb656b5e91ae792
 			}
 		})
 	}
+}
+
+func TestMetadataPath(t *testing.T) {
+	assert.Equal(t, "/path/to/layer.erofs.dmverity", MetadataPath("/path/to/layer.erofs"))
+}
+
+func TestParseMetadata(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	createMetadata := func(filename, content string) string {
+		layerBlob := tmpDir + "/" + strings.TrimSuffix(filename, ".dmverity")
+		os.WriteFile(tmpDir+"/"+filename, []byte(content), 0644)
+		return layerBlob
+	}
+
+	// Valid cases
+	layerBlob := createMetadata("layer.erofs.dmverity",
+		"roothash=abc123def456\nhash-offset=8192\nuse-superblock=true\n")
+	m, err := ParseMetadata(layerBlob)
+	assert.NoError(t, err)
+	assert.Equal(t, "abc123def456", m.RootHash)
+	assert.Equal(t, uint64(8192), m.HashOffset)
+	assert.True(t, m.UseSuperblock)
+
+	// use-superblock=false
+	layerBlob = createMetadata("layer2.erofs.dmverity", "roothash=def456\nhash-offset=16384\nuse-superblock=false\n")
+	m, _ = ParseMetadata(layerBlob)
+	assert.False(t, m.UseSuperblock)
+
+	// Error cases
+	layerBlob = createMetadata("layer3.erofs.dmverity", "hash-offset=8192\n")
+	_, err = ParseMetadata(layerBlob)
+	assert.ErrorContains(t, err, "roothash not found")
+
+	layerBlob = createMetadata("layer4.erofs.dmverity", "roothash=abc\n")
+	_, err = ParseMetadata(layerBlob)
+	assert.ErrorContains(t, err, "hash-offset not found")
+
+	_, err = ParseMetadata(tmpDir + "/nonexistent.erofs")
+	assert.ErrorContains(t, err, "metadata file not found")
 }
