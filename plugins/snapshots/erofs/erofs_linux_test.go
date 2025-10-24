@@ -26,6 +26,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/containerd/containerd/v2/core/content"
 	"github.com/containerd/containerd/v2/core/mount"
 	"github.com/containerd/containerd/v2/core/snapshots"
@@ -353,4 +356,152 @@ func createTestTarContent() io.ReadCloser {
 
 	// Return the tar as a ReadCloser
 	return tartest.TarFromWriterTo(tarWriter)
+}
+
+// TestCreateDmverityErofsMount tests dm-verity mount creation
+func TestCreateDmverityErofsMount(t *testing.T) {
+	testutil.RequiresRoot(t)
+
+	tmpDir := t.TempDir()
+
+	// Helper to create layer with metadata
+	createLayer := func(name, roothash string, hashOffset int64, useSuperblock bool) string {
+		layerBlob := filepath.Join(tmpDir, name)
+		metadataFile := layerBlob + ".dmverity"
+
+		metadataContent := fmt.Sprintf("roothash=%s\nhash-offset=%d\nuse-superblock=%t\n",
+			roothash, hashOffset, useSuperblock)
+		require.NoError(t, os.WriteFile(metadataFile, []byte(metadataContent), 0644))
+		require.NoError(t, os.WriteFile(layerBlob, []byte{}, 0644))
+
+		return layerBlob
+	}
+
+	// Helper to check if option exists
+	hasOption := func(options []string, opt string) bool {
+		for _, o := range options {
+			if o == opt {
+				return true
+			}
+		}
+		return false
+	}
+
+	s := &snapshotter{
+		root:           tmpDir,
+		enableDmverity: true,
+	}
+
+	t.Run("creates dmverity mount with metadata", func(t *testing.T) {
+		layerBlob := createLayer("layer.erofs",
+			"abc123def456789012345678901234567890123456789012345678901234", 8192, true)
+
+		m, err := s.createDmverityErofsMount("test-id", layerBlob)
+		require.NoError(t, err)
+
+		assert.Equal(t, "dmverity/erofs", m.Type)
+		assert.Equal(t, layerBlob, m.Source)
+		assert.True(t, hasOption(m.Options, "ro"), "should have ro option")
+		assert.True(t, hasOption(m.Options, "X-containerd.dmverity.roothash=abc123def456789012345678901234567890123456789012345678901234"))
+		assert.True(t, hasOption(m.Options, "X-containerd.dmverity.hash-offset=8192"))
+		assert.True(t, hasOption(m.Options, "X-containerd.dmverity.device-name=containerd-erofs-test-id"))
+		assert.False(t, hasOption(m.Options, "X-containerd.dmverity.no-superblock"), "should not have no-superblock when use-superblock=true")
+	})
+
+	t.Run("handles no-superblock flag", func(t *testing.T) {
+		layerBlob := createLayer("layer-no-sb.erofs",
+			"def456abc789012345678901234567890123456789012345678901234567", 16384, false)
+
+		m, err := s.createDmverityErofsMount("test-id-no-sb", layerBlob)
+		require.NoError(t, err)
+
+		assert.True(t, hasOption(m.Options, "X-containerd.dmverity.no-superblock"), "should have no-superblock when use-superblock=false")
+	})
+
+	t.Run("fails without metadata file", func(t *testing.T) {
+		layerBlob := filepath.Join(tmpDir, "layer-no-meta.erofs")
+		require.NoError(t, os.WriteFile(layerBlob, []byte{}, 0644))
+
+		_, err := s.createDmverityErofsMount("test-id-2", layerBlob)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to parse dm-verity metadata")
+	})
+
+	t.Run("fails with invalid metadata format", func(t *testing.T) {
+		layerBlob := filepath.Join(tmpDir, "layer-bad-meta.erofs")
+		metadataFile := layerBlob + ".dmverity"
+
+		require.NoError(t, os.WriteFile(metadataFile, []byte("invalid metadata"), 0644))
+		require.NoError(t, os.WriteFile(layerBlob, []byte{}, 0644))
+
+		_, err := s.createDmverityErofsMount("test-id-bad", layerBlob)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "failed to parse dm-verity metadata")
+	})
+}
+
+// TestCreateErofsMount tests mount creation without dm-verity
+func TestCreateErofsMount(t *testing.T) {
+	tmpDir := t.TempDir()
+	layerBlob := filepath.Join(tmpDir, "layer.erofs")
+	require.NoError(t, os.WriteFile(layerBlob, []byte{}, 0644))
+
+	s := &snapshotter{
+		root:           tmpDir,
+		enableDmverity: false,
+	}
+
+	t.Run("creates regular erofs mount", func(t *testing.T) {
+		m, err := s.createErofsMount("test-id", layerBlob)
+		require.NoError(t, err)
+
+		assert.Equal(t, "erofs", m.Type)
+		assert.Equal(t, layerBlob, m.Source)
+		assert.Equal(t, []string{"ro", "loop"}, m.Options)
+	})
+
+	t.Run("dispatcher calls dmverity function when enabled", func(t *testing.T) {
+		s.enableDmverity = true
+		metadataFile := layerBlob + ".dmverity"
+		metadataContent := "roothash=fedcba098765432109876543210987654321098765432109876543210987\nhash-offset=4096\nuse-superblock=true\n"
+		require.NoError(t, os.WriteFile(metadataFile, []byte(metadataContent), 0644))
+
+		m, err := s.createErofsMount("test-id", layerBlob)
+		require.NoError(t, err)
+		assert.Equal(t, "dmverity/erofs", m.Type)
+	})
+}
+
+// TestDmverityDeviceName tests device name generation
+func TestDmverityDeviceName(t *testing.T) {
+	s := &snapshotter{}
+
+	tests := []struct {
+		name string
+		id   string
+		want string
+	}{
+		{
+			name: "simple id",
+			id:   "abc123",
+			want: "containerd-erofs-abc123",
+		},
+		{
+			name: "numeric id",
+			id:   "12345",
+			want: "containerd-erofs-12345",
+		},
+		{
+			name: "uuid style id",
+			id:   "550e8400-e29b-41d4-a716-446655440000",
+			want: "containerd-erofs-550e8400-e29b-41d4-a716-446655440000",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := s.dmverityDeviceName(tt.id)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
