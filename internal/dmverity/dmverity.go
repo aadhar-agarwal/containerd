@@ -21,7 +21,6 @@ import (
 	"bufio"
 	"bytes"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"os"
 	"strings"
@@ -44,29 +43,29 @@ const (
 // DmverityOptions contains configuration options for dm-verity operations
 type DmverityOptions struct {
 	// Salt for hashing, represented as a hex string
-	Salt string `json:"salt,omitempty"`
+	Salt string
 	// Hash algorithm to use (default: sha256)
-	HashAlgorithm string `json:"hash_algorithm,omitempty"`
+	HashAlgorithm string
 	// Size of data blocks in bytes (default: 4096)
-	DataBlockSize uint32 `json:"data_block_size,omitempty"`
+	DataBlockSize uint32
 	// Size of hash blocks in bytes (default: 4096)
-	HashBlockSize uint32 `json:"hash_block_size,omitempty"`
+	HashBlockSize uint32
 	// Number of data blocks
-	DataBlocks uint64 `json:"data_blocks,omitempty"`
+	DataBlocks uint64
 	// Offset of hash area in bytes
-	HashOffset uint64 `json:"hash_offset,omitempty"`
+	HashOffset uint64
 	// Hash type (default: 1)
-	HashType uint32 `json:"hash_type,omitempty"`
+	HashType uint32
 	// Superblock usage flag (false meaning --no-superblock)
-	UseSuperblock bool `json:"use_superblock,omitempty"`
+	UseSuperblock bool
 	// Debug flag
-	Debug bool `json:"debug,omitempty"`
+	Debug bool
 	// UUID for device to use
-	UUID string `json:"uuid,omitempty"`
+	UUID string
 	// RootHashFile specifies a file path where the root hash should be saved
-	RootHashFile string `json:"root_hash_file,omitempty"`
+	RootHashFile string
 	// RootHash stores the root hash value (for metadata persistence)
-	RootHash string `json:"root_hash,omitempty"`
+	RootHash string
 }
 
 // DefaultDmverityOptions returns a DmverityOptions struct with default values
@@ -79,33 +78,6 @@ func DefaultDmverityOptions() DmverityOptions {
 		HashType:      1,
 		UseSuperblock: true,
 	}
-}
-
-// SaveMetadata saves DmverityOptions as JSON metadata file.
-// This allows all components (differ, snapshotter, mount manager) to share
-// the same dm-verity parameters used during formatting.
-func SaveMetadata(path string, opts *DmverityOptions) error {
-	data, err := json.MarshalIndent(opts, "", "  ")
-	if err != nil {
-		return fmt.Errorf("failed to marshal dm-verity options: %w", err)
-	}
-	if err := os.WriteFile(path, data, 0644); err != nil {
-		return fmt.Errorf("failed to write dm-verity metadata file: %w", err)
-	}
-	return nil
-}
-
-// LoadMetadata loads DmverityOptions from a JSON metadata file
-func LoadMetadata(path string) (*DmverityOptions, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read dm-verity metadata file: %w", err)
-	}
-	var opts DmverityOptions
-	if err := json.Unmarshal(data, &opts); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal dm-verity metadata: %w", err)
-	}
-	return &opts, nil
 }
 
 // ValidateOptions validates dm-verity options to ensure they are valid
@@ -201,4 +173,65 @@ func ExtractRootHash(output string, opts *DmverityOptions) (string, error) {
 	}
 
 	return rootHash, nil
+}
+
+// Metadata holds parsed dm-verity metadata parameters from the .dmverity file
+type Metadata struct {
+	RootHash      string
+	HashOffset    uint64
+	UseSuperblock bool
+}
+
+// MetadataPath returns the path to the dm-verity metadata file for a layer blob.
+// The metadata file contains dm-verity parameters (roothash, hash-offset, use-superblock)
+// in a simple key=value format.
+func MetadataPath(layerBlobPath string) string {
+	return layerBlobPath + ".dmverity"
+}
+
+// ParseMetadata reads and parses the .dmverity metadata file
+func ParseMetadata(layerBlobPath string) (*Metadata, error) {
+	metadataPath := MetadataPath(layerBlobPath)
+	metadataBytes, err := os.ReadFile(metadataPath)
+	if err != nil {
+		return nil, fmt.Errorf("metadata file not found at %q: %w", metadataPath, err)
+	}
+
+	metadata := &Metadata{
+		UseSuperblock: true, // default
+	}
+
+	lines := strings.Split(string(metadataBytes), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+
+		key, value, ok := strings.Cut(line, "=")
+		if !ok {
+			continue
+		}
+
+		switch key {
+		case "roothash":
+			metadata.RootHash = value
+		case "hash-offset":
+			if _, err := fmt.Sscanf(value, "%d", &metadata.HashOffset); err != nil {
+				return nil, fmt.Errorf("invalid hash-offset in metadata: %w", err)
+			}
+		case "use-superblock":
+			metadata.UseSuperblock = value == "true"
+		}
+	}
+
+	// Validate required parameters
+	if metadata.RootHash == "" {
+		return nil, fmt.Errorf("roothash not found in dm-verity metadata")
+	}
+	if metadata.HashOffset == 0 {
+		return nil, fmt.Errorf("hash-offset not found in dm-verity metadata")
+	}
+
+	return metadata, nil
 }
