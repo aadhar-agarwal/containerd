@@ -642,6 +642,24 @@ func (s *snapshotter) Remove(ctx context.Context, key string) (err error) {
 				log.G(ctx).WithError(err).WithField("id", id).Warnf("failed to cleanup upperdir")
 			}
 
+			// Close dm-verity device if it exists for this snapshot
+			// The device should already be unmounted by the container runtime before Remove() is called
+			// If the device is still mounted, dmverity.Close will fail safely and we'll log a debug message
+			if s.enableDmverity && id != "" {
+				deviceName := s.dmverityDeviceName(id)
+				devicePath := fmt.Sprintf("/dev/mapper/%s", deviceName)
+				if _, statErr := os.Stat(devicePath); statErr == nil {
+					log.G(ctx).WithField("device", deviceName).Info("attempting to close dm-verity device for removed snapshot")
+					// Try to close the device - will fail if still mounted or in use
+					if _, closeErr := dmverity.Close(deviceName); closeErr != nil {
+						// This is expected if device is still in use by another container or not yet unmounted
+						log.G(ctx).WithError(closeErr).WithField("device", deviceName).Debug("failed to close dm-verity device (may still be in use or mounted)")
+					} else {
+						log.G(ctx).WithField("device", deviceName).Info("dm-verity device closed successfully")
+					}
+				}
+			}
+
 			for _, dir := range removals {
 				if err := os.RemoveAll(dir); err != nil {
 					log.G(ctx).WithError(err).WithField("path", dir).Warn("failed to remove directory")
