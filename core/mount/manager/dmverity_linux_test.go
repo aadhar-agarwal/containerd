@@ -18,9 +18,6 @@ package manager
 
 import (
 	"context"
-	"fmt"
-	"os"
-	"path/filepath"
 	"testing"
 
 	"github.com/containerd/log/logtest"
@@ -44,7 +41,22 @@ func TestDmverityTransformer(t *testing.T) {
 		}
 		_, err := tr.Transform(ctx, m, nil)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "dmverity requires either roothash-file or roothash option")
+		assert.Contains(t, err.Error(), "dmverity requires roothash option")
+	})
+
+	// Test missing hash-offset
+	t.Run("requires hash-offset", func(t *testing.T) {
+		m := mount.Mount{
+			Source: "/path/to/layer.erofs",
+			Type:   "erofs",
+			Options: []string{
+				"ro",
+				"X-containerd.dmverity.roothash=abc123def456789012345678901234567890123456789012345678901234",
+			},
+		}
+		_, err := tr.Transform(ctx, m, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "dmverity requires hash-offset option")
 	})
 
 	// Test invalid option format
@@ -59,71 +71,77 @@ func TestDmverityTransformer(t *testing.T) {
 		assert.Contains(t, err.Error(), "invalid dmverity option")
 	})
 
-	// Test roothash file reading
-	t.Run("reads roothash from file", func(t *testing.T) {
-		tmpDir := t.TempDir()
-		roothashFile := filepath.Join(tmpDir, ".roothash")
-		hash := "abc123def456789012345678901234567890123456789012345678901234"
-		require.NoError(t, os.WriteFile(roothashFile, []byte(hash+"\n"), 0644))
-
+	// Test unknown dmverity option
+	t.Run("rejects unknown dmverity options", func(t *testing.T) {
 		m := mount.Mount{
 			Source: "/path/to/layer.erofs",
 			Type:   "erofs",
 			Options: []string{
 				"ro",
-				fmt.Sprintf("X-containerd.dmverity.roothash-file=%s", roothashFile),
+				"X-containerd.dmverity.unknown=value",
 			},
 		}
-
 		_, err := tr.Transform(ctx, m, nil)
-		// Will fail at device creation, but hash file should be read successfully
-		if err != nil {
-			assert.NotContains(t, err.Error(), "failed to read root hash file")
-		}
-	})
-}
-
-// TestDmverityHandler tests the handler's Mount method
-func TestDmverityHandler(t *testing.T) {
-	ctx := logtest.WithT(context.Background(), t)
-	handler := dmverityHandler{}
-
-	t.Run("requires device name in options", func(t *testing.T) {
-		m := mount.Mount{
-			Source:  "/dev/mapper/test-device",
-			Type:    "erofs",
-			Options: []string{"ro"},
-		}
-
-		_, err := handler.Mount(ctx, m, "/tmp/target", nil)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "dm-verity device name not found")
+		assert.Contains(t, err.Error(), "unknown dmverity option")
 	})
 
-	t.Run("extracts device name to MountData", func(t *testing.T) {
+	// Test invalid hash-offset value
+	t.Run("validates hash-offset format", func(t *testing.T) {
 		m := mount.Mount{
-			Source: "/dev/mapper/test-device",
+			Source: "/path/to/layer.erofs",
 			Type:   "erofs",
 			Options: []string{
 				"ro",
-				"X-containerd.dmverity.device-name=test-device-name",
+				"X-containerd.dmverity.roothash=abc123def456789012345678901234567890123456789012345678901234",
+				"X-containerd.dmverity.hash-offset=not-a-number",
 			},
 		}
+		_, err := tr.Transform(ctx, m, nil)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "invalid hash-offset value")
+	})
 
-		tmpDir := t.TempDir()
-		target := filepath.Join(tmpDir, "target")
-		require.NoError(t, os.MkdirAll(target, 0755))
-
-		active, err := handler.Mount(ctx, m, target, nil)
-
-		// Mount will fail (device doesn't exist), but we can verify device name extraction
+	// Test no-superblock flag
+	t.Run("parses no-superblock flag", func(t *testing.T) {
+		m := mount.Mount{
+			Source: "/path/to/layer.erofs",
+			Type:   "erofs",
+			Options: []string{
+				"ro",
+				"X-containerd.dmverity.roothash=abc123def456789012345678901234567890123456789012345678901234",
+				"X-containerd.dmverity.hash-offset=1048576",
+				"X-containerd.dmverity.no-superblock",
+			},
+		}
+		_, err := tr.Transform(ctx, m, nil)
+		// Will fail at device creation, but parsing should succeed
 		if err != nil {
-			t.Logf("Expected mount failure: %v", err)
-		} else {
-			// Verify MountData contains device name
-			require.NotNil(t, active.MountData)
-			assert.Equal(t, "test-device-name", active.MountData["dmverity-device"])
-			_ = mount.Unmount(target, 0)
+			// Should not be a parsing error
+			assert.NotContains(t, err.Error(), "invalid dmverity option")
+			assert.NotContains(t, err.Error(), "requires roothash")
+			assert.NotContains(t, err.Error(), "requires hash-offset")
+		}
+	})
+
+	// Test device name extraction
+	t.Run("extracts device name from options", func(t *testing.T) {
+		m := mount.Mount{
+			Source: "/path/to/layer.erofs",
+			Type:   "erofs",
+			Options: []string{
+				"ro",
+				"X-containerd.dmverity.roothash=abc123def456789012345678901234567890123456789012345678901234",
+				"X-containerd.dmverity.hash-offset=1048576",
+				"X-containerd.dmverity.device-name=test-device",
+			},
+		}
+		_, err := tr.Transform(ctx, m, nil)
+		// Will fail at device creation, but parsing should succeed
+		if err != nil {
+			// Should not be a parsing error
+			assert.NotContains(t, err.Error(), "invalid dmverity option")
+			assert.NotContains(t, err.Error(), "requires roothash")
 		}
 	})
 }

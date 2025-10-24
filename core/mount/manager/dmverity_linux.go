@@ -35,6 +35,57 @@ const (
 	prefixDmverity = "X-containerd.dmverity."
 )
 
+// parseDmverityMountOptions extracts dm-verity parameters from mount options
+// Returns the parsed metadata, device name, and filtered regular options
+func parseDmverityMountOptions(mountOptions []string) (*dmverity.Metadata, string, []string, error) {
+	metadata := &dmverity.Metadata{
+		UseSuperblock: true, // default
+	}
+
+	var deviceName string
+	var regularOptions []string
+	var hasHashOffset bool
+
+	for _, o := range mountOptions {
+		if dmverityOption, isDmverity := strings.CutPrefix(o, prefixDmverity); isDmverity {
+			key, value, ok := strings.Cut(dmverityOption, "=")
+			if !ok {
+				// Handle boolean flags like "no-superblock"
+				if dmverityOption == "no-superblock" {
+					metadata.UseSuperblock = false
+					continue
+				}
+				return nil, "", nil, fmt.Errorf("invalid dmverity option %q: %w", o, errdefs.ErrInvalidArgument)
+			}
+			switch key {
+			case "device-name":
+				deviceName = value
+			case "roothash":
+				metadata.RootHash = value
+			case "hash-offset":
+				if _, err := fmt.Sscanf(value, "%d", &metadata.HashOffset); err != nil {
+					return nil, "", nil, fmt.Errorf("invalid hash-offset value %q: %w", value, err)
+				}
+				hasHashOffset = true
+			default:
+				return nil, "", nil, fmt.Errorf("unknown dmverity option %q: %w", key, errdefs.ErrInvalidArgument)
+			}
+		} else {
+			regularOptions = append(regularOptions, o)
+		}
+	}
+
+	// Validate required options
+	if metadata.RootHash == "" {
+		return nil, "", nil, fmt.Errorf("dmverity requires roothash option: %w", errdefs.ErrInvalidArgument)
+	}
+	if !hasHashOffset {
+		return nil, "", nil, fmt.Errorf("dmverity requires hash-offset option: %w", errdefs.ErrInvalidArgument)
+	}
+
+	return metadata, deviceName, regularOptions, nil
+}
+
 // dmverityTransformer is a mount transformer that sets up dm-verity devices
 // for integrity verification. It reads dm-verity options from mount options
 // and creates a read-only device-mapper target.
@@ -51,35 +102,15 @@ func (dmverityTransformer) Transform(ctx context.Context, m mount.Mount, a []mou
 		return mount.Mount{}, fmt.Errorf("dm-verity is not supported on this system: veritysetup not available or dm_verity module not loaded: %w", errdefs.ErrNotImplemented)
 	}
 
-	var (
-		deviceName   string
-		metadataFile string
-	)
-
 	// Parse dm-verity options from mount options
-	var options []string
-	for _, o := range m.Options {
-		if dmverityOption, isDmverity := strings.CutPrefix(o, prefixDmverity); isDmverity {
-			key, value, ok := strings.Cut(dmverityOption, "=")
-			if !ok {
-				return mount.Mount{}, fmt.Errorf("invalid dmverity option %q: %w", o, errdefs.ErrInvalidArgument)
-			}
-			switch key {
-			case "device-name":
-				deviceName = value
-			case "metadata-file":
-				metadataFile = value
-			default:
-				return mount.Mount{}, fmt.Errorf("unknown dmverity option %q: %w", key, errdefs.ErrInvalidArgument)
-			}
-		} else {
-			options = append(options, o)
-		}
+	metadata, deviceName, regularOptions, err := parseDmverityMountOptions(m.Options)
+	if err != nil {
+		return mount.Mount{}, err
 	}
 
-	// Validate required options
-	if metadataFile == "" {
-		return mount.Mount{}, fmt.Errorf("dmverity requires metadata-file option: %w", errdefs.ErrInvalidArgument)
+	// Validate root hash format
+	if err := dmverity.ValidateRootHash(metadata.RootHash); err != nil {
+		return mount.Mount{}, fmt.Errorf("invalid root hash: %w", err)
 	}
 
 	// Generate device name if not specified
@@ -95,26 +126,27 @@ func (dmverityTransformer) Transform(ctx context.Context, m mount.Mount, a []mou
 		log.G(ctx).WithField("device", devicePath).Debug("dm-verity device already exists, reusing")
 		// Device exists, just reuse it
 		m.Source = devicePath
-		m.Options = options
+		m.Options = regularOptions
 		return m, nil
 	}
 
-	// Prepare dm-verity options by loading metadata from file
-	// The metadata contains all dm-verity parameters used during formatting,
-	// including block sizes (512 for tar index mode, 4096 for regular mode),
-	// hash offset, root hash file path, and other options.
-	opts, err := dmverity.LoadMetadata(metadataFile)
-	if err != nil {
-		return mount.Mount{}, fmt.Errorf("failed to load dm-verity metadata from %q: %w", metadataFile, err)
+	// Build minimal dm-verity options for Open command
+	// Open only needs hash-offset, superblock flag, and root-hash
+	opts := &dmverity.DmverityOptions{
+		HashOffset:    metadata.HashOffset,
+		UseSuperblock: metadata.UseSuperblock,
+		RootHash:      metadata.RootHash,
 	}
 
 	// Create dm-verity device
 	log.G(ctx).WithFields(log.Fields{
-		"source":      m.Source,
-		"device-name": deviceName,
+		"source":         m.Source,
+		"device-name":    deviceName,
+		"hash-offset":    metadata.HashOffset,
+		"use-superblock": metadata.UseSuperblock,
 	}).Debug("opening dm-verity device")
 
-	_, err = dmverity.Open(m.Source, deviceName, m.Source, opts.RootHash, opts)
+	_, err = dmverity.Open(m.Source, deviceName, m.Source, metadata.RootHash, opts)
 	if err != nil {
 		return mount.Mount{}, fmt.Errorf("failed to open dm-verity device: %w", err)
 	}
@@ -139,6 +171,6 @@ func (dmverityTransformer) Transform(ctx context.Context, m mount.Mount, a []mou
 	// Return updated mount pointing to dm-verity device
 	// Store the device name in options so it can be retrieved during cleanup
 	m.Source = devicePath
-	m.Options = append(options, fmt.Sprintf("X-containerd.dmverity.device-name=%s", deviceName))
+	m.Options = append(regularOptions, fmt.Sprintf("X-containerd.dmverity.device-name=%s", deviceName))
 	return m, nil
 }

@@ -23,7 +23,6 @@ import (
 	"context"
 	"fmt"
 	"os"
-	"path/filepath"
 
 	"github.com/containerd/log"
 
@@ -51,8 +50,8 @@ func (s *erofsDiff) getDmverityOptions() dmverity.DmverityOptions {
 // formatDmverityLayer formats an EROFS layer with dm-verity hash tree
 func (s *erofsDiff) formatDmverityLayer(ctx context.Context, layerBlobPath string) error {
 	// Check if layer is already formatted by checking for metadata file
-	metadataPath := layerBlobPath + ".metadata"
-	if _, err := os.Stat(metadataPath); err == nil {
+	dmverityMetadataPath := dmverity.MetadataPath(layerBlobPath)
+	if _, err := os.Stat(dmverityMetadataPath); err == nil {
 		log.G(ctx).WithField("path", layerBlobPath).Debug("Layer already formatted with dm-verity, skipping")
 		return nil
 	}
@@ -92,8 +91,9 @@ func (s *erofsDiff) formatDmverityLayer(ctx context.Context, layerBlobPath strin
 	opts.DataBlocks = uint64(dataBlocks)
 	opts.HashOffset = uint64(hashOffset)
 
-	// Create root hash file path in the same directory
-	rootHashPath := layerBlobPath + ".roothash"
+	// Use a temporary root hash file path for veritysetup format command
+	// Using a file to ensure we do not have to parse the format output
+	rootHashPath := layerBlobPath + ".roothash.tmp"
 	opts.RootHashFile = rootHashPath
 
 	_, err = dmverity.Format(layerBlobPath, layerBlobPath, &opts)
@@ -108,36 +108,27 @@ func (s *erofsDiff) formatDmverityLayer(ctx context.Context, layerBlobPath strin
 	}
 	rootHash := string(bytes.TrimSpace(rootHashBytes))
 
-	// Store root hash in options for metadata persistence
-	opts.RootHash = rootHash
+	// Save dm-verity parameters to a separate metadata file
+	// This allows the snapshotter to read parameters without recalculation
+	metadata := fmt.Sprintf("roothash=%s\nhash-offset=%d\nuse-superblock=%v\n", rootHash, hashOffset, opts.UseSuperblock)
+	if err := os.WriteFile(dmverityMetadataPath, []byte(metadata), 0644); err != nil {
+		return fmt.Errorf("failed to write dm-verity metadata file: %w", err)
+	}
 
-	// Save complete dm-verity options as metadata for use by snapshotter and mount manager
-	if err := dmverity.SaveMetadata(metadataPath, &opts); err != nil {
-		return fmt.Errorf("failed to save metadata: %w", err)
+	// Remove the temporary root hash file since all information is now in the metadata file
+	if err := os.Remove(rootHashPath); err != nil {
+		// Log but don't fail if removal fails
+		log.G(ctx).WithError(err).Warnf("Failed to remove temporary root hash file %q", rootHashPath)
 	}
 
 	log.G(ctx).WithFields(log.Fields{
-		"path":         layerBlobPath,
-		"size":         fileSize,
-		"blockSize":    opts.DataBlockSize,
-		"dataBlocks":   dataBlocks,
-		"hashOffset":   hashOffset,
-		"metadataPath": metadataPath,
+		"path":       layerBlobPath,
+		"size":       fileSize,
+		"blockSize":  opts.DataBlockSize,
+		"dataBlocks": dataBlocks,
+		"hashOffset": hashOffset,
+		"rootHash":   rootHash,
 	}).Info("Successfully formatted dm-verity layer")
 
 	return nil
-}
-
-// rootHashPathFromLayer returns the root hash file path for a layer blob path
-func rootHashPathFromLayer(layerBlobPath string) string {
-	return layerBlobPath + ".roothash"
-}
-
-// dmverityDeviceNameFromLayer returns the dm-verity device name for a layer blob
-func dmverityDeviceNameFromLayer(layerBlobPath string) string {
-	// Extract the snapshot ID from the path
-	// Path format: /path/to/snapshots/<id>/layer.erofs
-	dir := filepath.Dir(layerBlobPath)
-	id := filepath.Base(dir)
-	return fmt.Sprintf("containerd-erofs-%s", id)
 }

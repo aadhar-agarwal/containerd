@@ -254,27 +254,30 @@ func (s *snapshotter) createErofsMount(id string, layerBlob string) (mount.Mount
 }
 
 // createDmverityErofsMount creates a mount specification for an EROFS layer with dm-verity integrity verification.
-// It requires the layer to have associated .metadata file containing dm-verity parameters.
+// It requires the layer to have an associated .dmverity metadata file.
 func (s *snapshotter) createDmverityErofsMount(id string, layerBlob string) (mount.Mount, error) {
-	// Check if layer has dm-verity metadata
-	metadataPath := layerBlob + ".metadata"
-	if _, err := os.Stat(metadataPath); err != nil {
-		// When dm-verity is enabled, all layers MUST be formatted with dm-verity
-		return mount.Mount{}, fmt.Errorf("dm-verity enabled but layer metadata not found at %q: %w", metadataPath, err)
+	// Parse dm-verity parameters from metadata file
+	metadata, err := dmverity.ParseMetadata(layerBlob)
+	if err != nil {
+		return mount.Mount{}, fmt.Errorf("failed to parse dm-verity metadata: %w", err)
 	}
 
-	// The metadata file contains all dm-verity parameters (block sizes, hash offset, root hash file, etc.)
-	// that will be loaded by the mount transformer to create the dm-verity device.
+	// Build mount options with dm-verity parameters
+	options := []string{
+		"ro",
+		fmt.Sprintf("X-containerd.dmverity.roothash=%s", metadata.RootHash),
+		fmt.Sprintf("X-containerd.dmverity.hash-offset=%d", metadata.HashOffset),
+		fmt.Sprintf("X-containerd.dmverity.device-name=%s", s.dmverityDeviceName(id)),
+	}
+
+	if !metadata.UseSuperblock {
+		options = append(options, "X-containerd.dmverity.no-superblock")
+	}
+
 	return mount.Mount{
-		Source: layerBlob,
-		Type:   "dmverity/erofs",
-		Options: []string{
-			"ro",
-			// Pass metadata file path so mount transformer can load all dm-verity parameters
-			fmt.Sprintf("X-containerd.dmverity.metadata-file=%s", metadataPath),
-			// Use deterministic device name based on layer ID for reuse across containers
-			fmt.Sprintf("X-containerd.dmverity.device-name=%s", s.dmverityDeviceName(id)),
-		},
+		Source:  layerBlob,
+		Type:    "dmverity/erofs",
+		Options: options,
 	}, nil
 }
 
