@@ -1,0 +1,51 @@
+%%{init: {'theme':'base', 'themeVariables': { 'primaryColor':'#ffcccc','primaryTextColor':'#000','primaryBorderColor':'#000','lineColor':'#666','secondaryColor':'#cce5ff','tertiaryColor':'#fff','noteBkgColor':'#ffffcc','noteTextColor':'#000','noteBorderColor':'#000','actorBkg':'#e6f3ff','actorBorder':'#000','actorTextColor':'#000','actorLineColor':'#666','signalColor':'#000','signalTextColor':'#000','labelBoxBkgColor':'#ffeecc','labelBoxBorderColor':'#000','labelTextColor':'#000','loopTextColor':'#000','activationBorderColor':'#666','activationBkgColor':'#cce5ff','sequenceNumberColor':'#000'}}}%%
+sequenceDiagram
+    participant User
+    participant Snapshotter
+    participant Differ
+    participant MountManager
+    participant EROFSHandler
+    participant DMVerity
+    participant Kernel
+
+    Note over User,Kernel: Phase 1 - Layer Creation
+    User->>Snapshotter: ctr run container
+    Snapshotter->>Differ: Apply layer (first run)
+    Differ->>Differ: mkfs.erofs
+    Differ->>DMVerity: Generate Merkle tree
+    DMVerity->>Differ: Root hash + hash offset
+    Differ->>Differ: Append hash tree to layer.erofs
+    Differ->>Differ: Save .dmverity metadata
+    Differ->>Snapshotter: Layer ready
+
+    Note over User,Kernel: Phase 2 - Runtime Mounting
+    User->>Snapshotter: Create container
+    Snapshotter->>Snapshotter: createErofsMount()
+    Snapshotter->>MountManager: Mount spec (Type=erofs)
+    MountManager->>EROFSHandler: Delegate to handler
+    EROFSHandler->>DMVerity: ReadMetadata(.dmverity)
+    
+    alt dm-verity metadata exists
+        DMVerity->>EROFSHandler: Return metadata
+        EROFSHandler->>Kernel: Create loop device
+        Kernel->>EROFSHandler: loop9 device
+        EROFSHandler->>DMVerity: Open(source, hash, offset)
+        DMVerity->>Kernel: Create dm-verity device
+        Kernel->>DMVerity: mapper device created
+        DMVerity->>EROFSHandler: Return device path
+        EROFSHandler->>Kernel: Mount EROFS from dm-verity
+    else no dm-verity metadata
+        EROFSHandler->>Kernel: Mount EROFS directly
+    end
+    
+    EROFSHandler->>MountManager: ActiveMount
+    MountManager->>User: Container ready
+
+    Note over User,Kernel: Phase 3 - Cleanup
+    User->>MountManager: Stop container
+    MountManager->>EROFSHandler: Unmount()
+    alt dm-verity was used
+        EROFSHandler->>DMVerity: Close(device)
+        DMVerity->>Kernel: Remove dm-verity device
+    end
+    EROFSHandler->>Kernel: Free loop device
