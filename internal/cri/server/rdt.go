@@ -33,7 +33,7 @@ func (c *criService) rdtClassFromAnnotations(containerName string, containerAnno
 	if err == nil {
 		// Our internal check that RDT has been enabled
 		if cls != "" && !rdt.IsEnabled() {
-			err = fmt.Errorf("RDT disabled, refusing to set RDT class of container %q to %q", containerName, cls)
+			err = fmt.Errorf("rdt disabled, refusing to set RDT class of container %q to %q", containerName, cls)
 		}
 	}
 

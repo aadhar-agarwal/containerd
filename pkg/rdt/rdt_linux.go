@@ -64,7 +64,7 @@ func SetConfig(configFilePath string) error {
 	initOnce.Do(func() {
 		err := rdt.Initialize(ResctrlPrefix)
 		if err != nil {
-			initErr = fmt.Errorf("RDT not enabled: %w", err)
+			initErr = fmt.Errorf("rdt not enabled: %w", err)
 		}
 	})
 	if initErr != nil {

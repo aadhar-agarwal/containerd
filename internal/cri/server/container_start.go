@@ -251,7 +251,7 @@ func (c *criService) StartContainer(ctx context.Context, r *runtime.StartContain
 	err = c.nri.StartContainer(ctx, &sandbox, &cntr)
 	if err != nil {
 		log.G(ctx).WithError(err).Errorf("NRI container start failed")
-		return nil, fmt.Errorf("NRI container start failed: %w", err)
+		return nil, fmt.Errorf("nri container start failed: %w", err)
 	}
 
 	// Start containerd task.

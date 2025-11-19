@@ -52,7 +52,7 @@ func (c *criService) UpdateContainerResources(ctx context.Context, r *runtime.Up
 	resources := r.GetLinux()
 	updated, err := c.nri.UpdateContainerResources(ctx, &sandbox, &container, resources)
 	if err != nil {
-		return nil, fmt.Errorf("NRI container update failed: %w", err)
+		return nil, fmt.Errorf("nri container update failed: %w", err)
 	}
 	if updated != nil {
 		r.Linux = updated

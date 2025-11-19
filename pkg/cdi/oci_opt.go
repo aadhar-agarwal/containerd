@@ -44,7 +44,7 @@ func WithCDIDevices(devices ...string) oci.SpecOpts {
 		}
 
 		if _, err := cdi.InjectDevices(s, devices...); err != nil {
-			return fmt.Errorf("CDI device injection failed: %w", err)
+			return fmt.Errorf("cdi device injection failed: %w", err)
 		}
 
 		// One crucial thing to keep in mind is that CDI device injection

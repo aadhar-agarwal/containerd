@@ -74,7 +74,7 @@ func WithNTFSFormat() scratchCreationOpt {
 func WithSize(size uint64) scratchCreationOpt {
 	return func(opts *scratchCreationOptions) error {
 		if size == 0 {
-			return fmt.Errorf("VHD size cannot be zero")
+			return fmt.Errorf("vhd size cannot be zero")
 		}
 		opts.sizeInBytes = size
 		return nil

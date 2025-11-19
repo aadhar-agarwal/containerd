@@ -350,12 +350,12 @@ func parseUsernsIDs(userns *runtime.UserNamespace) (uids, gids []runtimespec.Lin
 
 	uids, err := parseUsernsIDMap(userns.GetUids())
 	if err != nil {
-		return nil, nil, fmt.Errorf("UID mapping: %w", err)
+		return nil, nil, fmt.Errorf("uid mapping: %w", err)
 	}
 
 	gids, err = parseUsernsIDMap(userns.GetGids())
 	if err != nil {
-		return nil, nil, fmt.Errorf("GID mapping: %w", err)
+		return nil, nil, fmt.Errorf("gid mapping: %w", err)
 	}
 
 	switch mode := userns.GetMode(); mode {

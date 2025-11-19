@@ -173,7 +173,7 @@ func newExporter(ctx context.Context) (*otlptrace.Exporter, error) {
 		return otlptracegrpc.New(ctx)
 	default:
 		// Other protocols such as "http/json" are not supported.
-		return nil, fmt.Errorf("OpenTelemetry protocol %q : %w", v, errdefs.ErrNotImplemented)
+		return nil, fmt.Errorf("openTelemetry protocol %q : %w", v, errdefs.ErrNotImplemented)
 	}
 }
 

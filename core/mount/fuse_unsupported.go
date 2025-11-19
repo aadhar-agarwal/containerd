@@ -26,5 +26,5 @@ func isFUSE(dir string) bool {
 
 // unmountFUSE is not implemented on this platform
 func unmountFUSE(target string) error {
-	return fmt.Errorf("FUSE is not supported on this platform")
+	return fmt.Errorf("fuse is not supported on this platform")
 }

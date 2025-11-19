@@ -143,7 +143,7 @@ func (t *domainTable) updateContainers(ctx context.Context, updates []*nri.Conta
 	}
 
 	if len(failed) != 0 {
-		return failed, fmt.Errorf("NRI update of some containers failed")
+		return failed, fmt.Errorf("nri update of some containers failed")
 	}
 
 	return nil, nil
@@ -171,7 +171,7 @@ func (t *domainTable) evictContainers(ctx context.Context, evict []*nri.Containe
 	}
 
 	if len(failed) != 0 {
-		return failed, fmt.Errorf("NRI eviction of some containers failed")
+		return failed, fmt.Errorf("nri eviction of some containers failed")
 	}
 
 	return nil, nil

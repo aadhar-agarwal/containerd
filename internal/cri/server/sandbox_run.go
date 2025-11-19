@@ -324,7 +324,7 @@ func (c *criService) RunPodSandbox(ctx context.Context, r *runtime.RunPodSandbox
 
 	err = c.nri.RunPodSandbox(ctx, &sandbox)
 	if err != nil {
-		return nil, fmt.Errorf("NRI RunPodSandbox failed: %w", err)
+		return nil, fmt.Errorf("nri RunPodSandbox failed: %w", err)
 	}
 
 	defer func() {
