@@ -60,7 +60,6 @@ func (h *erofsMountHandler) Mount(ctx context.Context, m mount.Mount, mp string,
 	for _, opt := range m.Options {
 		if strings.HasPrefix(opt, "X-containerd.dmverity=") {
 			dmverityMode = strings.TrimPrefix(opt, "X-containerd.dmverity=")
-			break
 		}
 	}
 
@@ -82,14 +81,24 @@ func (h *erofsMountHandler) Mount(ctx context.Context, m mount.Mount, mp string,
 		// Check if device already exists (for layer reuse)
 		devicePath := dmverity.DevicePath(deviceName)
 		if _, err := os.Stat(devicePath); os.IsNotExist(err) {
-			// Create dm-verity device
+			// Check for signature file written by the differ during Apply
+			var signatureFile string
+			sigPath := dmverity.SignaturePath(m.Source)
+			if _, err := os.Stat(sigPath); err == nil {
+				// The signature file already contains binary data (decoded from base64 during Apply)
+				// We just need to use it directly
+				signatureFile = sigPath
+
+				log.G(ctx).WithField("root_hash", metadata.RootHash).Info("Using signature for dm-verity")
+			}
+
 			log.G(ctx).WithFields(log.Fields{
 				"source":      m.Source,
 				"device-name": deviceName,
 				"hash-offset": metadata.HashOffset,
 			}).Debug("opening dm-verity device")
 
-			devicePath, err = dmverity.Open(m.Source, deviceName, m.Source, metadata.RootHash, metadata.HashOffset, nil)
+			devicePath, err = dmverity.OpenWithSignature(m.Source, deviceName, m.Source, metadata.RootHash, metadata.HashOffset, nil, signatureFile)
 			if err != nil {
 				return mount.ActiveMount{}, fmt.Errorf("failed to open dm-verity device: %w", err)
 			}
@@ -121,7 +130,7 @@ func (h *erofsMountHandler) Mount(ctx context.Context, m mount.Mount, mp string,
 
 	filteredOptions := make([]string, 0, len(m.Options))
 	for _, v := range m.Options {
-		// Skip loop option (handled by loop device setup) and dmverity mode option (already processed)
+		// Skip processed options
 		if v == "loop" || strings.HasPrefix(v, "X-containerd.dmverity=") {
 			continue
 		}

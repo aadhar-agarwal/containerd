@@ -18,6 +18,7 @@ package erofs
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -34,7 +35,9 @@ import (
 	"github.com/containerd/containerd/v2/core/diff"
 	"github.com/containerd/containerd/v2/core/images"
 	"github.com/containerd/containerd/v2/core/mount"
+	"github.com/containerd/containerd/v2/internal/dmverity"
 	"github.com/containerd/containerd/v2/internal/erofsutils"
+	snpkg "github.com/containerd/containerd/v2/pkg/snapshotters"
 
 	"github.com/google/uuid"
 )
@@ -209,6 +212,19 @@ func (s erofsDiff) Apply(ctx context.Context, desc ocispec.Descriptor, mounts []
 	if s.enableDmverity {
 		if err := s.formatDmverityLayer(ctx, layerBlobPath); err != nil {
 			return emptyDesc, fmt.Errorf("failed to format dm-verity layer: %w", err)
+		}
+
+		// Write signature file if signature annotation is present on the layer descriptor
+		if sig := desc.Annotations[snpkg.TargetLayerSignatureLabel]; sig != "" {
+			sigPath := dmverity.SignaturePath(layerBlobPath)
+			sigBytes, err := base64.StdEncoding.DecodeString(sig)
+			if err != nil {
+				return emptyDesc, fmt.Errorf("failed to decode signature: %w", err)
+			}
+			if err := os.WriteFile(sigPath, sigBytes, 0644); err != nil {
+				return emptyDesc, fmt.Errorf("failed to write signature file: %w", err)
+			}
+			log.G(ctx).WithField("path", sigPath).Debug("Wrote dm-verity signature file")
 		}
 	}
 
