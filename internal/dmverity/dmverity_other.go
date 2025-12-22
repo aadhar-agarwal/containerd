@@ -34,6 +34,10 @@ func Open(_ string, _ string, _ string, _ string, _ uint64, _ *DmverityOptions) 
 	return "", errUnsupported
 }
 
+func OpenWithSignature(_ string, _ string, _ string, _ string, _ uint64, _ *DmverityOptions, _ string) (string, error) {
+	return "", errUnsupported
+}
+
 func Close(_ string) error {
 	return errUnsupported
 }

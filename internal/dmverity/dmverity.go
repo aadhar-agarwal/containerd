@@ -60,6 +60,12 @@ func MetadataPath(layerBlobPath string) string {
 	return layerBlobPath + ".dmverity"
 }
 
+// SignaturePath returns the path to the dm-verity signature file for a layer.
+// The signature file contains the base64-encoded PKCS7 signature for root hash verification.
+func SignaturePath(layerBlobPath string) string {
+	return layerBlobPath + ".sig"
+}
+
 func DevicePath(name string) string {
 	return fmt.Sprintf("/dev/mapper/%s", name)
 }

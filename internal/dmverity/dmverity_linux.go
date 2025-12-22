@@ -126,6 +126,13 @@ func Format(dataDevice, hashDevice string, opts *DmverityOptions) (string, error
 //     Uses explicitly provided parameters from opts. All dm-verity parameters must be
 //     supplied programmatically since there's no superblock to read from.
 func Open(dataDevice string, name string, hashDevice string, rootHash string, hashOffset uint64, opts *DmverityOptions) (string, error) {
+	return OpenWithSignature(dataDevice, name, hashDevice, rootHash, hashOffset, opts, "")
+}
+
+// OpenWithSignature creates a read-only device-mapper target with optional signature verification.
+// When signatureFile is provided, dm-verity will verify the root hash signature using the kernel keyring.
+// This provides cryptographic proof that the root hash hasn't been tampered with.
+func OpenWithSignature(dataDevice string, name string, hashDevice string, rootHash string, hashOffset uint64, opts *DmverityOptions, signatureFile string) (string, error) {
 	if rootHash == "" {
 		return "", fmt.Errorf("rootHash cannot be empty")
 	}
@@ -172,7 +179,7 @@ func Open(dataDevice string, name string, hashDevice string, rootHash string, ha
 		hashLoopDevice = dataLoopDevice
 	}
 
-	devicePath, err := verity.Open(&params, name, dataLoopDevice, hashLoopDevice, rootDigest, "", nil)
+	devicePath, err := verity.Open(&params, name, dataLoopDevice, hashLoopDevice, rootDigest, signatureFile, nil)
 	if err != nil {
 		dataLoop.Close()
 		mount.DetachLoopDevice(dataLoopDevice)
