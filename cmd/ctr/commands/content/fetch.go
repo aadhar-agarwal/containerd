@@ -297,6 +297,8 @@ outer:
 						statuses[key] = StatusInfo{
 							Ref:    key,
 							Status: StatusExists,
+							// Offset: info.Size,
+							// Total:  info.Size,
 						}
 					}
 				} else if done {
@@ -408,9 +410,10 @@ type StatusInfo struct {
 
 // Display pretty prints out the download or upload progress
 func Display(w io.Writer, statuses []StatusInfo, start time.Time) {
-	var total int64
+	var downloaded, totalSize int64
 	for _, status := range statuses {
-		total += status.Offset
+		downloaded += status.Offset
+		totalSize += status.Total
 		switch status.Status {
 		case StatusDownloading, StatusUploading:
 			var bar progress.Bar
@@ -437,13 +440,20 @@ func Display(w io.Writer, statuses []StatusInfo, start time.Time) {
 		}
 	}
 
-	fmt.Fprintf(w, "elapsed: %-4.1fs\ttotal: %7.6v\t(%v)\t\n",
+	// Calculate overall progress percentage
+	var progressPct float64
+	if totalSize > 0 {
+		progressPct = float64(downloaded) / float64(totalSize) * 100
+	}
+	fmt.Fprintf(w, "elapsed: %-4.1fs\tdownloaded: %7.6v / %7.6v (%.1f%%)\t(%v)\t\n",
 		time.Since(start).Seconds(),
 		// TODO(stevvooe): These calculations are actually way off.
 		// Need to account for previously downloaded data. These
 		// will basically be right for a download the first time
 		// but will be skewed if restarting, as it includes the
 		// data into the start time before.
-		progress.Bytes(total),
-		progress.NewBytesPerSecond(total, time.Since(start)))
+		progress.Bytes(downloaded),
+		progress.Bytes(totalSize),
+		progressPct,
+		progress.NewBytesPerSecond(downloaded, time.Since(start)))
 }

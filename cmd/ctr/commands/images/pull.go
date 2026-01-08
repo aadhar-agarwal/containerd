@@ -387,14 +387,23 @@ func ProgressHandler(ctx context.Context, out io.Writer) (transfer.ProgressFunc,
 }
 
 func DisplayHierarchy(w io.Writer, status string, roots []*progressNode, start time.Time) {
-	total := displayNode(w, "", roots)
+	downloaded, totalSize := displayNode(w, "", roots)
 	for _, r := range roots {
 		if desc := r.mainDesc(); desc != nil {
 			fmt.Fprintf(w, "%s %s\n", desc.MediaType, desc.Digest)
 		}
 	}
-	// Print the Status line
-	fmt.Fprintf(w, "%s\telapsed: %-4.1fs\ttotal: %7.6v\t(%v)\t\n",
+	// When pull is complete, ensure we show 100%
+	if strings.Contains(status, "Completed") && totalSize > 0 {
+		downloaded = totalSize
+	}
+	// Calculate overall progress percentage
+	var progressPct float64
+	if totalSize > 0 {
+		progressPct = float64(downloaded) / float64(totalSize) * 100
+	}
+	// Print the Status line with total size and progress percentage
+	fmt.Fprintf(w, "%s\telapsed: %-4.1fs\tdownloaded: %7.6v / %7.6v (%.1f%%)\t(%v)\t\n",
 		status,
 		time.Since(start).Seconds(),
 		// TODO(stevvooe): These calculations are actually way off.
@@ -402,15 +411,34 @@ func DisplayHierarchy(w io.Writer, status string, roots []*progressNode, start t
 		// will basically be right for a download the first time
 		// but will be skewed if restarting, as it includes the
 		// data into the start time before.
-		progress.Bytes(total),
-		progress.NewBytesPerSecond(total, time.Since(start)))
+		progress.Bytes(downloaded),
+		progress.Bytes(totalSize),
+		progressPct,
+		progress.NewBytesPerSecond(downloaded, time.Since(start)))
 }
 
-func displayNode(w io.Writer, prefix string, nodes []*progressNode) int64 {
-	var total int64
+func displayNode(w io.Writer, prefix string, nodes []*progressNode) (int64, int64) {
+	var downloaded, totalSize int64
 	for i, node := range nodes {
 		status := node.Progress
-		total += status.Progress
+		// For completed items, count Total as downloaded; for in-progress, use Progress
+		switch status.Event {
+		case "complete", "extracted", "done", "exists", "already exists":
+			// Completed items: count their total size as fully downloaded
+			if status.Total > 0 {
+				downloaded += status.Total
+				totalSize += status.Total
+			} else {
+				// Fallback for items without Total set
+				downloaded += status.Progress
+			}
+		case "downloading", "uploading", "extracting":
+			downloaded += status.Progress
+			totalSize += status.Total
+		default:
+			// For waiting/resolving, only count towards total if known
+			totalSize += status.Total
+		}
 		pf, cpf := prefixes(i, len(nodes))
 		if node.root {
 			pf, cpf = "", ""
@@ -446,9 +474,11 @@ func displayNode(w io.Writer, prefix string, nodes []*progressNode) int64 {
 				name,
 				status.Event)
 		}
-		total += displayNode(w, prefix+cpf, node.children)
+		childDownloaded, childTotal := displayNode(w, prefix+cpf, node.children)
+		downloaded += childDownloaded
+		totalSize += childTotal
 	}
-	return total
+	return downloaded, totalSize
 }
 
 func prefixes(index, length int) (prefix string, childPrefix string) {
@@ -480,9 +510,25 @@ func shortenName(name string) string {
 // Display pretty prints out the download or upload progress
 // Status tree
 func Display(w io.Writer, status string, statuses []transfer.Progress, start time.Time) {
-	var total int64
+	var downloaded, totalSize int64
 	for _, status := range statuses {
-		total += status.Progress
+		// For completed items, count Total as downloaded; for in-progress, use Progress
+		switch status.Event {
+		case "complete", "extracted", "done", "exists", "already exists":
+			// Completed items: count their total size as fully downloaded
+			if status.Total > 0 {
+				downloaded += status.Total
+				totalSize += status.Total
+			} else {
+				// Fallback for items without Total set
+				downloaded += status.Progress
+			}
+		case "downloading", "uploading", "extracting":
+			downloaded += status.Progress
+			totalSize += status.Total
+		default:
+			totalSize += status.Total
+		}
 		switch status.Event {
 		case "downloading", "uploading":
 			var bar progress.Bar
@@ -513,8 +559,17 @@ func Display(w io.Writer, status string, statuses []transfer.Progress, start tim
 		}
 	}
 
-	// Print the Status line
-	fmt.Fprintf(w, "%s\telapsed: %-4.1fs\ttotal: %7.6v\t(%v)\t\n",
+	// When pull is complete, ensure we show 100%
+	if strings.Contains(status, "Completed") && totalSize > 0 {
+		downloaded = totalSize
+	}
+	// Calculate overall progress percentage
+	var progressPct float64
+	if totalSize > 0 {
+		progressPct = float64(downloaded) / float64(totalSize) * 100
+	}
+	// Print the Status line with total size and progress percentage
+	fmt.Fprintf(w, "%s\telapsed: %-4.1fs\tdownloaded: %7.6v / %7.6v (%.1f%%)\t(%v)\t\n",
 		status,
 		time.Since(start).Seconds(),
 		// TODO(stevvooe): These calculations are actually way off.
@@ -522,6 +577,8 @@ func Display(w io.Writer, status string, statuses []transfer.Progress, start tim
 		// will basically be right for a download the first time
 		// but will be skewed if restarting, as it includes the
 		// data into the start time before.
-		progress.Bytes(total),
-		progress.NewBytesPerSecond(total, time.Since(start)))
+		progress.Bytes(downloaded),
+		progress.Bytes(totalSize),
+		progressPct,
+		progress.NewBytesPerSecond(downloaded, time.Since(start)))
 }
