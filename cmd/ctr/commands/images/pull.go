@@ -408,6 +408,8 @@ func DisplayHierarchy(w io.Writer, status string, roots []*progressNode, start t
 		blobCount)
 }
 
+// countBlobs recursively counts all progress nodes in the tree, including
+// manifests, configs, and layers.
 func countBlobs(nodes []*progressNode) int {
 	count := 0
 	for _, node := range nodes {
