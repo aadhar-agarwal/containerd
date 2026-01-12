@@ -42,6 +42,11 @@ type Config struct {
 	// EnableDmverity enables dm-verity formatting for EROFS layers
 	// Linux only
 	EnableDmverity bool `toml:"enable_dmverity"`
+
+	// RequireSignatures requires dm-verity signatures to be present on all layers.
+	// When enabled, layer application will fail if a signature is not present.
+	// Only has effect when EnableDmverity is true.
+	RequireSignatures bool `toml:"require_signatures"`
 }
 
 func init() {
@@ -91,6 +96,10 @@ func init() {
 					return nil, fmt.Errorf("dm-verity is not supported on this system (dm_verity module not loaded): %w", plugin.ErrSkipPlugin)
 				}
 				opts = append(opts, erofs.WithDmverity())
+
+				if config.RequireSignatures {
+					opts = append(opts, erofs.WithRequireSignatures())
+				}
 			}
 
 			return erofs.NewErofsDiffer(cs, opts...), nil

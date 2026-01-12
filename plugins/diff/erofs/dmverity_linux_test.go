@@ -59,11 +59,13 @@ func TestFormatDmverityLayer(t *testing.T) {
 		layerPath := filepath.Join(tmpDir, "layer.erofs")
 		require.NoError(t, os.WriteFile(layerPath, make([]byte, 8192), 0644))
 
-		require.NoError(t, d.formatDmverityLayer(ctx, layerPath))
+		rootHash, err := d.formatDmverityLayer(ctx, layerPath)
+		require.NoError(t, err)
+		assert.NotEmpty(t, rootHash)
 
 		metadata, err := dmverity.ReadMetadata(layerPath)
 		require.NoError(t, err)
-		assert.NotEmpty(t, metadata.RootHash)
+		assert.Equal(t, rootHash, metadata.RootHash)
 		assert.Greater(t, metadata.HashOffset, uint64(0))
 		assert.Equal(t, uint64(8192), metadata.HashOffset)
 	})
@@ -74,13 +76,12 @@ func TestFormatDmverityLayer(t *testing.T) {
 		require.NoError(t, os.WriteFile(layerPath, make([]byte, 8192), 0644))
 
 		// First format
-		require.NoError(t, d.formatDmverityLayer(ctx, layerPath))
-		metadata1, _ := dmverity.ReadMetadata(layerPath)
-		origHash := metadata1.RootHash
+		rootHash1, err := d.formatDmverityLayer(ctx, layerPath)
+		require.NoError(t, err)
 
-		require.NoError(t, d.formatDmverityLayer(ctx, layerPath))
-		metadata2, _ := dmverity.ReadMetadata(layerPath)
-		assert.Equal(t, origHash, metadata2.RootHash)
+		rootHash2, err := d.formatDmverityLayer(ctx, layerPath)
+		require.NoError(t, err)
+		assert.Equal(t, rootHash1, rootHash2)
 	})
 
 	t.Run("uses 4096-byte blocks in regular mode", func(t *testing.T) {
@@ -88,7 +89,8 @@ func TestFormatDmverityLayer(t *testing.T) {
 		layerPath := filepath.Join(tmpDir, "layer-4k.erofs")
 		require.NoError(t, os.WriteFile(layerPath, make([]byte, 8192), 0644))
 
-		require.NoError(t, d.formatDmverityLayer(ctx, layerPath))
+		_, err := d.formatDmverityLayer(ctx, layerPath)
+		require.NoError(t, err)
 
 		metadata, _ := dmverity.ReadMetadata(layerPath)
 		assert.Equal(t, uint64(8192), metadata.HashOffset)
@@ -99,7 +101,8 @@ func TestFormatDmverityLayer(t *testing.T) {
 		layerPath := filepath.Join(tmpDir, "layer-512.erofs")
 		require.NoError(t, os.WriteFile(layerPath, make([]byte, 1024), 0644))
 
-		require.NoError(t, d.formatDmverityLayer(ctx, layerPath))
+		_, err := d.formatDmverityLayer(ctx, layerPath)
+		require.NoError(t, err)
 
 		metadata, _ := dmverity.ReadMetadata(layerPath)
 		assert.Equal(t, uint64(1024), metadata.HashOffset)
@@ -107,7 +110,7 @@ func TestFormatDmverityLayer(t *testing.T) {
 
 	t.Run("returns error for non-existent file", func(t *testing.T) {
 		d := &erofsDiff{enableDmverity: true, enableTarIndex: false}
-		err := d.formatDmverityLayer(ctx, filepath.Join(tmpDir, "missing.erofs"))
+		_, err := d.formatDmverityLayer(ctx, filepath.Join(tmpDir, "missing.erofs"))
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to stat layer blob")
 	})
@@ -118,7 +121,8 @@ func TestFormatDmverityLayer(t *testing.T) {
 		// Write 5000 bytes (not aligned to 4096), should round up to 8192
 		require.NoError(t, os.WriteFile(layerPath, make([]byte, 5000), 0644))
 
-		require.NoError(t, d.formatDmverityLayer(ctx, layerPath))
+		_, err := d.formatDmverityLayer(ctx, layerPath)
+		require.NoError(t, err)
 
 		metadata, err := dmverity.ReadMetadata(layerPath)
 		require.NoError(t, err)
