@@ -57,6 +57,9 @@ type erofsDiff struct {
 	enableTarIndex bool
 	// enableDmverity enables formatting layers with dm-verity after creation
 	enableDmverity bool
+	// requireSignatures requires dm-verity signatures to be present on layers
+	// when dm-verity is enabled. If true, Apply will fail if a layer lacks a signature.
+	requireSignatures bool
 }
 
 // DifferOpt is an option for configuring the erofs differ
@@ -80,6 +83,14 @@ func WithTarIndexMode() DifferOpt {
 func WithDmverity() DifferOpt {
 	return func(d *erofsDiff) {
 		d.enableDmverity = true
+	}
+}
+
+// WithRequireSignatures requires dm-verity signatures to be present on layers.
+// This option only has effect when dm-verity is enabled.
+func WithRequireSignatures() DifferOpt {
+	return func(d *erofsDiff) {
+		d.requireSignatures = true
 	}
 }
 
@@ -209,14 +220,25 @@ func (s erofsDiff) Apply(ctx context.Context, desc ocispec.Descriptor, mounts []
 
 	// Format with dm-verity if enabled
 	if s.enableDmverity {
-		if err := s.formatDmverityLayer(ctx, layerBlobPath); err != nil {
+		rootHash, err := s.formatDmverityLayer(ctx, layerBlobPath)
+		if err != nil {
 			return emptyDesc, fmt.Errorf("failed to format dm-verity layer: %w", err)
 		}
 
-		// Write signature file if signature annotation is present on the layer descriptor
-		// TODO: Check if the roothash calculated on the node matches that from the registry
-		// TODO: Need a config to check for signature presence and fail if missing here
-		if sig := desc.Annotations[snpkg.TargetLayerSignatureLabel]; sig != "" {
+		if s.requireSignatures {
+			sig := desc.Annotations[snpkg.TargetLayerSignatureLabel]
+			if sig == "" {
+				return emptyDesc, fmt.Errorf("dm-verity signature required but not present on layer %s", desc.Digest)
+			}
+
+			expectedRootHash := desc.Annotations[snpkg.TargetLayerRootHashLabel]
+			if expectedRootHash == "" {
+				return emptyDesc, fmt.Errorf("dm-verity signature present but missing expected root hash for layer %s", desc.Digest)
+			}
+			if rootHash != expectedRootHash {
+				return emptyDesc, fmt.Errorf("dm-verity root hash mismatch for layer %s: computed %q, expected %q", desc.Digest, rootHash, expectedRootHash)
+			}
+
 			if err := dmverity.WriteSignature(layerBlobPath, sig); err != nil {
 				return emptyDesc, err
 			}

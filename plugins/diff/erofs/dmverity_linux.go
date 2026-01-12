@@ -53,17 +53,21 @@ func (s *erofsDiff) getDmverityOptions() *dmverity.DmverityOptions {
 	return opts
 }
 
-// formatDmverityLayer formats an EROFS layer with dm-verity hash tree
-func (s *erofsDiff) formatDmverityLayer(ctx context.Context, layerBlobPath string) error {
+// formatDmverityLayer formats an EROFS layer with dm-verity hash tree and returns the computed root hash
+func (s *erofsDiff) formatDmverityLayer(ctx context.Context, layerBlobPath string) (string, error) {
 	metadataPath := dmverity.MetadataPath(layerBlobPath)
 	if _, err := os.Stat(metadataPath); err == nil {
 		log.G(ctx).WithField("path", layerBlobPath).Debug("Layer already formatted with dm-verity, skipping")
-		return nil
+		metadata, err := dmverity.ReadMetadata(layerBlobPath)
+		if err != nil {
+			return "", fmt.Errorf("failed to read existing dm-verity metadata: %w", err)
+		}
+		return metadata.RootHash, nil
 	}
 
 	fileInfo, err := os.Stat(layerBlobPath)
 	if err != nil {
-		return fmt.Errorf("failed to stat layer blob: %w", err)
+		return "", fmt.Errorf("failed to stat layer blob: %w", err)
 	}
 
 	opts := s.getDmverityOptions()
@@ -85,7 +89,7 @@ func (s *erofsDiff) formatDmverityLayer(ctx context.Context, layerBlobPath strin
 		HashType:      opts.HashType,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to calculate hash tree size: %w", err)
+		return "", fmt.Errorf("failed to calculate hash tree size: %w", err)
 	}
 
 	// In superblock mode, Format() stores the superblock at hashOffset and the hash tree after it
@@ -95,7 +99,7 @@ func (s *erofsDiff) formatDmverityLayer(ctx context.Context, layerBlobPath strin
 	}
 	requiredSize := hashOffset + superblockSize + hashTreeSize
 	if err := os.Truncate(layerBlobPath, int64(requiredSize)); err != nil {
-		return fmt.Errorf("failed to pre-allocate space for hash tree: %w", err)
+		return "", fmt.Errorf("failed to pre-allocate space for hash tree: %w", err)
 	}
 
 	// Generate a random UUID for the superblock (required for superblock mode)
@@ -106,7 +110,7 @@ func (s *erofsDiff) formatDmverityLayer(ctx context.Context, layerBlobPath strin
 
 	rootHash, err := dmverity.Format(layerBlobPath, layerBlobPath, opts)
 	if err != nil {
-		return fmt.Errorf("failed to format dm-verity: %w", err)
+		return "", fmt.Errorf("failed to format dm-verity: %w", err)
 	}
 
 	// Important: Save the ORIGINAL hashOffset (where superblock is located),
@@ -118,10 +122,10 @@ func (s *erofsDiff) formatDmverityLayer(ctx context.Context, layerBlobPath strin
 	}
 	metadataBytes, err := json.MarshalIndent(metadata, "", "  ")
 	if err != nil {
-		return fmt.Errorf("failed to marshal dm-verity metadata: %w", err)
+		return "", fmt.Errorf("failed to marshal dm-verity metadata: %w", err)
 	}
 	if err := os.WriteFile(metadataPath, metadataBytes, 0644); err != nil {
-		return fmt.Errorf("failed to write dm-verity metadata: %w", err)
+		return "", fmt.Errorf("failed to write dm-verity metadata: %w", err)
 	}
 
 	log.G(ctx).WithFields(log.Fields{
@@ -132,5 +136,5 @@ func (s *erofsDiff) formatDmverityLayer(ctx context.Context, layerBlobPath strin
 		"rootHash":   rootHash,
 	}).Info("Successfully formatted dm-verity layer")
 
-	return nil
+	return rootHash, nil
 }
