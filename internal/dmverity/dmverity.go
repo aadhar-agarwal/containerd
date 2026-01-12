@@ -19,6 +19,7 @@
 package dmverity
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -64,6 +65,19 @@ func MetadataPath(layerBlobPath string) string {
 // The signature file contains the base64-encoded PKCS7 signature for root hash verification.
 func SignaturePath(layerBlobPath string) string {
 	return layerBlobPath + ".sig"
+}
+
+// WriteSignature writes a base64-encoded signature to the signature file for a layer.
+func WriteSignature(layerBlobPath string, base64Sig string) error {
+	sigPath := SignaturePath(layerBlobPath)
+	sigBytes, err := base64.StdEncoding.DecodeString(base64Sig)
+	if err != nil {
+		return fmt.Errorf("failed to decode signature: %w", err)
+	}
+	if err := os.WriteFile(sigPath, sigBytes, 0644); err != nil {
+		return fmt.Errorf("failed to write signature file: %w", err)
+	}
+	return nil
 }
 
 func DevicePath(name string) string {
