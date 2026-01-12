@@ -18,7 +18,6 @@ package erofs
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"io"
 	"os"
@@ -215,16 +214,13 @@ func (s erofsDiff) Apply(ctx context.Context, desc ocispec.Descriptor, mounts []
 		}
 
 		// Write signature file if signature annotation is present on the layer descriptor
+		// TODO: Check if the roothash calculated on the node matches that from the registry
+		// TODO: Need a config to check for signature presence and fail if missing here
 		if sig := desc.Annotations[snpkg.TargetLayerSignatureLabel]; sig != "" {
-			sigPath := dmverity.SignaturePath(layerBlobPath)
-			sigBytes, err := base64.StdEncoding.DecodeString(sig)
-			if err != nil {
-				return emptyDesc, fmt.Errorf("failed to decode signature: %w", err)
+			if err := dmverity.WriteSignature(layerBlobPath, sig); err != nil {
+				return emptyDesc, err
 			}
-			if err := os.WriteFile(sigPath, sigBytes, 0644); err != nil {
-				return emptyDesc, fmt.Errorf("failed to write signature file: %w", err)
-			}
-			log.G(ctx).WithField("path", sigPath).Debug("Wrote dm-verity signature file")
+			log.G(ctx).WithField("path", dmverity.SignaturePath(layerBlobPath)).Debug("Wrote dm-verity signature file")
 		}
 	}
 

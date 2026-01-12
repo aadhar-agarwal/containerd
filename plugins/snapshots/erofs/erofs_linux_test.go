@@ -389,7 +389,7 @@ func TestCreateErofsMount(t *testing.T) {
 	}
 
 	t.Run("creates regular erofs mount", func(t *testing.T) {
-		m, err := s.createErofsMount(context.Background(), layerBlob)
+		m, err := s.createErofsMount(layerBlob)
 		require.NoError(t, err)
 
 		assert.Equal(t, "erofs", m.Type)
@@ -402,7 +402,7 @@ func TestCreateErofsMount(t *testing.T) {
 		s.dmverityMode = "on"
 		createDmverityMetadata(t, layerBlob)
 
-		m, err := s.createErofsMount(context.Background(), layerBlob)
+		m, err := s.createErofsMount(layerBlob)
 		require.NoError(t, err)
 		// Mount type is always "erofs" - dm-verity detection happens in mount handler
 		assert.Equal(t, "erofs", m.Type)
@@ -421,7 +421,7 @@ func TestCreateErofsMount(t *testing.T) {
 
 		s.dmverityMode = "off"
 
-		m, err := s.createErofsMount(context.Background(), layerBlob)
+		m, err := s.createErofsMount(layerBlob)
 		require.NoError(t, err)
 
 		assert.Equal(t, "erofs", m.Type)

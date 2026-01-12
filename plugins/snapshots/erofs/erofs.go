@@ -282,41 +282,39 @@ func (s *snapshotter) mountFsMeta(snap storage.Snapshot, id int) (mount.Mount, b
 	return m, true
 }
 
-// applyDmverityPolicy validates dm-verity policy for a layer and returns mount options.
-// Signatures are read from .sig files by the mount handler, not passed via mount options.
-func (s *snapshotter) applyDmverityPolicy(layerBlob string) ([]string, error) {
-	var options []string
-
+// applyDmverityPolicy validates and applies dm-verity policy for a layer.
+// Returns the X-containerd.dmverity option if needed, or empty string otherwise.
+func (s *snapshotter) applyDmverityPolicy(layerBlob string) (string, error) {
 	metadataPath := dmverity.MetadataPath(layerBlob)
 	_, metadataErr := os.Stat(metadataPath)
 	metadataExists := metadataErr == nil
 
 	// Validate dmverityMode policy: mode "on" requires .dmverity metadata to exist
 	if s.dmverityMode == "on" && !metadataExists {
-		return nil, fmt.Errorf("dm-verity mode is 'on' but .dmverity metadata not found for layer %s", layerBlob)
+		return "", fmt.Errorf("dm-verity mode is 'on' but .dmverity metadata not found for layer %s", layerBlob)
 	}
 
-	// Only add mode option if metadata exists and we need to override the default "auto" behavior
+	// Only return option if metadata exists and we need to override the default "auto" behavior
 	// This keeps standard EROFS mounts (without dm-verity) unchanged
 	if metadataExists && s.dmverityMode != "auto" {
 		// Mode "off": disables dm-verity even though metadata exists
 		// Mode "on": explicitly enables dm-verity (though "auto" would do the same)
-		options = append(options, fmt.Sprintf("X-containerd.dmverity=%s", s.dmverityMode))
+		return fmt.Sprintf("X-containerd.dmverity=%s", s.dmverityMode), nil
 	}
 
-	return options, nil
+	return "", nil
 }
 
 // createErofsMount creates a mount specification for an EROFS layer.
-// Applies dmverityMode policy. Signatures are read from .sig files by the mount handler.
-func (s *snapshotter) createErofsMount(ctx context.Context, layerBlob string) (mount.Mount, error) {
+// Applies dmverityMode policy and passes it to the mount handler.
+func (s *snapshotter) createErofsMount(layerBlob string) (mount.Mount, error) {
 	options := []string{"ro", "loop"}
 
-	dmverityOpts, err := s.applyDmverityPolicy(layerBlob)
-	if err != nil {
+	if dmverityOpt, err := s.applyDmverityPolicy(layerBlob); err != nil {
 		return mount.Mount{}, err
+	} else if dmverityOpt != "" {
+		options = append(options, dmverityOpt)
 	}
-	options = append(options, dmverityOpts...)
 
 	return mount.Mount{
 		Source:  layerBlob,
@@ -338,7 +336,7 @@ func (s *snapshotter) mounts(ctx context.Context, snap storage.Snapshot, info sn
 					return nil, err
 				}
 			}
-			m, err := s.createErofsMount(ctx, layerBlob)
+			m, err := s.createErofsMount(layerBlob)
 			if err != nil {
 				return nil, fmt.Errorf("failed to create erofs mount: %w", err)
 			}
@@ -421,7 +419,7 @@ func (s *snapshotter) mounts(ctx context.Context, snap storage.Snapshot, info sn
 			return nil, err
 		}
 
-		m, err := s.createErofsMount(ctx, layerBlob)
+		m, err := s.createErofsMount(layerBlob)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create erofs mount: %w", err)
 		}
@@ -445,7 +443,7 @@ func (s *snapshotter) mounts(ctx context.Context, snap storage.Snapshot, info sn
 			return nil, err
 		}
 
-		m, err := s.createErofsMount(ctx, layerBlob)
+		m, err := s.createErofsMount(layerBlob)
 		if err != nil {
 			return nil, fmt.Errorf("failed to create erofs mount for parent %s: %w", snap.ParentIDs[i], err)
 		}
