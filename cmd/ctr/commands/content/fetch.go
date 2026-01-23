@@ -409,8 +409,14 @@ type StatusInfo struct {
 // Display pretty prints out the download or upload progress
 func Display(w io.Writer, statuses []StatusInfo, start time.Time) {
 	var total int64
+	var grandTotal int64
+	var layerCount int
 	for _, status := range statuses {
 		total += status.Offset
+		if status.Total > 0 {
+			grandTotal += status.Total
+			layerCount++
+		}
 		switch status.Status {
 		case StatusDownloading, StatusUploading:
 			var bar progress.Bar
@@ -437,13 +443,20 @@ func Display(w io.Writer, statuses []StatusInfo, start time.Time) {
 		}
 	}
 
-	fmt.Fprintf(w, "elapsed: %-4.1fs\ttotal: %7.6v\t(%v)\t\n",
-		time.Since(start).Seconds(),
-		// TODO(stevvooe): These calculations are actually way off.
-		// Need to account for previously downloaded data. These
-		// will basically be right for a download the first time
-		// but will be skewed if restarting, as it includes the
-		// data into the start time before.
-		progress.Bytes(total),
-		progress.NewBytesPerSecond(total, time.Since(start)))
+	// Show overall progress with total size and layer count
+	if grandTotal > 0 {
+		overallPercent := float64(total) / float64(grandTotal) * 100
+		fmt.Fprintf(w, "elapsed: %-4.1fs\ttotal: %7.6v/%7.6v (%.1f%%)\t(%d layers)\t%v\t\n",
+			time.Since(start).Seconds(),
+			progress.Bytes(total),
+			progress.Bytes(grandTotal),
+			overallPercent,
+			layerCount,
+			progress.NewBytesPerSecond(total, time.Since(start)))
+	} else {
+		fmt.Fprintf(w, "elapsed: %-4.1fs\ttotal: %7.6v\t(%v)\t\n",
+			time.Since(start).Seconds(),
+			progress.Bytes(total),
+			progress.NewBytesPerSecond(total, time.Since(start)))
+	}
 }

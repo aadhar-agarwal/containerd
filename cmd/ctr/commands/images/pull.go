@@ -387,30 +387,43 @@ func ProgressHandler(ctx context.Context, out io.Writer) (transfer.ProgressFunc,
 }
 
 func DisplayHierarchy(w io.Writer, status string, roots []*progressNode, start time.Time) {
-	total := displayNode(w, "", roots)
+	downloaded, grandTotal, layerCount := displayNode(w, "", roots)
 	for _, r := range roots {
 		if desc := r.mainDesc(); desc != nil {
 			fmt.Fprintf(w, "%s %s\n", desc.MediaType, desc.Digest)
 		}
 	}
-	// Print the Status line
-	fmt.Fprintf(w, "%s\telapsed: %-4.1fs\ttotal: %7.6v\t(%v)\t\n",
-		status,
-		time.Since(start).Seconds(),
-		// TODO(stevvooe): These calculations are actually way off.
-		// Need to account for previously downloaded data. These
-		// will basically be right for a download the first time
-		// but will be skewed if restarting, as it includes the
-		// data into the start time before.
-		progress.Bytes(total),
-		progress.NewBytesPerSecond(total, time.Since(start)))
+	// Print the Status line with overall progress
+	if grandTotal > 0 {
+		overallPercent := float64(downloaded) / float64(grandTotal) * 100
+		fmt.Fprintf(w, "%s\telapsed: %-4.1fs\ttotal: %7.6v/%7.6v (%.1f%%)\t(%d layers)\t%v\t\n",
+			status,
+			time.Since(start).Seconds(),
+			progress.Bytes(downloaded),
+			progress.Bytes(grandTotal),
+			overallPercent,
+			layerCount,
+			progress.NewBytesPerSecond(downloaded, time.Since(start)))
+	} else {
+		fmt.Fprintf(w, "%s\telapsed: %-4.1fs\ttotal: %7.6v\t(%v)\t\n",
+			status,
+			time.Since(start).Seconds(),
+			progress.Bytes(downloaded),
+			progress.NewBytesPerSecond(downloaded, time.Since(start)))
+	}
 }
 
-func displayNode(w io.Writer, prefix string, nodes []*progressNode) int64 {
-	var total int64
+// displayNode renders nodes and returns (downloaded bytes, total bytes, layer count)
+func displayNode(w io.Writer, prefix string, nodes []*progressNode) (int64, int64, int) {
+	var downloaded, grandTotal int64
+	var layerCount int
 	for i, node := range nodes {
 		status := node.Progress
-		total += status.Progress
+		downloaded += status.Progress
+		if status.Total > 0 {
+			grandTotal += status.Total
+			layerCount++
+		}
 		pf, cpf := prefixes(i, len(nodes))
 		if node.root {
 			pf, cpf = "", ""
@@ -446,9 +459,12 @@ func displayNode(w io.Writer, prefix string, nodes []*progressNode) int64 {
 				name,
 				status.Event)
 		}
-		total += displayNode(w, prefix+cpf, node.children)
+		childDownloaded, childTotal, childLayers := displayNode(w, prefix+cpf, node.children)
+		downloaded += childDownloaded
+		grandTotal += childTotal
+		layerCount += childLayers
 	}
-	return total
+	return downloaded, grandTotal, layerCount
 }
 
 func prefixes(index, length int) (prefix string, childPrefix string) {
@@ -481,8 +497,14 @@ func shortenName(name string) string {
 // Status tree
 func Display(w io.Writer, status string, statuses []transfer.Progress, start time.Time) {
 	var total int64
+	var grandTotal int64
+	var layerCount int
 	for _, status := range statuses {
 		total += status.Progress
+		if status.Total > 0 {
+			grandTotal += status.Total
+			layerCount++
+		}
 		switch status.Event {
 		case "downloading", "uploading":
 			var bar progress.Bar
@@ -513,15 +535,22 @@ func Display(w io.Writer, status string, statuses []transfer.Progress, start tim
 		}
 	}
 
-	// Print the Status line
-	fmt.Fprintf(w, "%s\telapsed: %-4.1fs\ttotal: %7.6v\t(%v)\t\n",
-		status,
-		time.Since(start).Seconds(),
-		// TODO(stevvooe): These calculations are actually way off.
-		// Need to account for previously downloaded data. These
-		// will basically be right for a download the first time
-		// but will be skewed if restarting, as it includes the
-		// data into the start time before.
-		progress.Bytes(total),
-		progress.NewBytesPerSecond(total, time.Since(start)))
+	// Print the Status line with overall progress
+	if grandTotal > 0 {
+		overallPercent := float64(total) / float64(grandTotal) * 100
+		fmt.Fprintf(w, "%s\telapsed: %-4.1fs\ttotal: %7.6v/%7.6v (%.1f%%)\t(%d layers)\t%v\t\n",
+			status,
+			time.Since(start).Seconds(),
+			progress.Bytes(total),
+			progress.Bytes(grandTotal),
+			overallPercent,
+			layerCount,
+			progress.NewBytesPerSecond(total, time.Since(start)))
+	} else {
+		fmt.Fprintf(w, "%s\telapsed: %-4.1fs\ttotal: %7.6v\t(%v)\t\n",
+			status,
+			time.Since(start).Seconds(),
+			progress.Bytes(total),
+			progress.NewBytesPerSecond(total, time.Since(start)))
+	}
 }
