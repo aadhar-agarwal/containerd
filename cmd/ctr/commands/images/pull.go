@@ -388,13 +388,14 @@ func ProgressHandler(ctx context.Context, out io.Writer) (transfer.ProgressFunc,
 
 func DisplayHierarchy(w io.Writer, status string, roots []*progressNode, start time.Time) {
 	total := displayNode(w, "", roots)
+	blobCount := countBlobs(roots)
 	for _, r := range roots {
 		if desc := r.mainDesc(); desc != nil {
 			fmt.Fprintf(w, "%s %s\n", desc.MediaType, desc.Digest)
 		}
 	}
 	// Print the Status line
-	fmt.Fprintf(w, "%s\telapsed: %-4.1fs\ttotal: %7.6v\t(%v)\t\n",
+	fmt.Fprintf(w, "%s\telapsed: %-4.1fs\ttotal: %7.6v\t(%v)\tblobs: %d\t\n",
 		status,
 		time.Since(start).Seconds(),
 		// TODO(stevvooe): These calculations are actually way off.
@@ -403,7 +404,19 @@ func DisplayHierarchy(w io.Writer, status string, roots []*progressNode, start t
 		// but will be skewed if restarting, as it includes the
 		// data into the start time before.
 		progress.Bytes(total),
-		progress.NewBytesPerSecond(total, time.Since(start)))
+		progress.NewBytesPerSecond(total, time.Since(start)),
+		blobCount)
+}
+
+// countBlobs recursively counts all progress nodes in the tree, including
+// manifests, configs, and layers.
+func countBlobs(nodes []*progressNode) int {
+	count := 0
+	for _, node := range nodes {
+		count++
+		count += countBlobs(node.children)
+	}
+	return count
 }
 
 func displayNode(w io.Writer, prefix string, nodes []*progressNode) int64 {
